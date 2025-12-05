@@ -1,0 +1,561 @@
+{
+  "packages": {
+    "wall_pack_1": {
+      "name": "Wall Pack 1",
+      "description": "Basic wall structures and components",
+      "icon": "fas fa-building",
+      "objects": [
+        {
+          "prop": "bazq-sur1",
+          "name": "Wall Section 1",
+          "image": "bazq-sur1.png",
+          "tags": ["wall", "structure", "basic"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-sur2",
+          "name": "Wall Section 2",
+          "image": "bazq-sur2.png",
+          "tags": ["wall", "structure", "basic"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-sur3",
+          "name": "Wall Section 3",
+          "image": "bazq-sur3.png",
+          "tags": ["wall", "structure", "basic"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-sur4",
+          "name": "Wall Section 4",
+          "image": "bazq-sur4.png",
+          "tags": ["wall", "structure", "basic"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-sur5",
+          "name": "Wall Section 5",
+          "image": "bazq-sur5.png",
+          "tags": ["wall", "structure", "basic"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-sur_kapi",
+          "name": "Wall Door",
+          "image": "bazq-sur_kapi.png",
+          "tags": ["door", "entrance", "wall"],
+          "category": "doors",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-sur_mkapi",
+          "name": "Wall Gate",
+          "image": "bazq-sur_mkapi.png",
+          "tags": ["gate", "entrance", "wall"],
+          "category": "doors",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-kule1",
+          "name": "Tower 1",
+          "image": "bazq-kule1.png",
+          "tags": ["tower", "structure", "premium"],
+          "category": "towers",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-kule_int",
+              "offset": {"x": 0, "y": 0, "z": 0},
+              "heading_offset": 0,
+              "type": "interior"
+            }
+          ]
+        },
+        {
+          "prop": "bazq-kule2",
+          "name": "Tower 2",
+          "image": "bazq-kule2.png",
+          "tags": ["tower", "structure", "premium"],
+          "category": "towers",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-kule_int",
+              "offset": {"x": 0, "y": 0, "z": 0},
+              "heading_offset": 0,
+              "type": "interior"
+            }
+          ]
+        }
+      ]
+    },
+    "wall_pack_2": {
+      "name": "Wall Pack 2",
+      "description": "Advanced wall system with decorations",
+      "icon": "fas fa-layer-group",
+      "objects": [
+        {
+          "prop": "bazq-wall2_wall1",
+          "name": "Advanced Wall 1",
+          "image": "bazq-wall2_wall1.png",
+          "tags": ["wall", "advanced", "structure"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_wall2",
+          "name": "Advanced Wall 2",
+          "image": "bazq-wall2_wall2.png",
+          "tags": ["wall", "advanced", "structure"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_wall3",
+          "name": "Advanced Wall 3",
+          "image": "bazq-wall2_wall3.png",
+          "tags": ["wall", "advanced", "structure"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_wall4",
+          "name": "Advanced Wall 4",
+          "image": "bazq-wall2_wall4.png",
+          "tags": ["wall", "advanced", "structure"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_wall5",
+          "name": "Advanced Wall 5",
+          "image": "bazq-wall2_wall5.png",
+          "tags": ["wall", "advanced", "structure"],
+          "category": "walls",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_gate1",
+          "name": "Gate Type 1",
+          "image": "bazq-wall2_gate1.png",
+          "tags": ["gate", "entrance", "advanced"],
+          "category": "doors",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_gate2",
+          "name": "Gate Type 2",
+          "image": "bazq-wall2_gate2.png",
+          "tags": ["gate", "entrance", "advanced"],
+          "category": "doors",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_gate3",
+          "name": "Gate Type 3",
+          "image": "bazq-wall2_gate3.png",
+          "tags": ["gate", "entrance", "advanced"],
+          "category": "doors",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_gate4",
+          "name": "Gate Type 4",
+          "image": "bazq-wall2_gate4.png",
+          "tags": ["gate", "entrance", "advanced"],
+          "category": "doors",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_pole",
+          "name": "Wall Pole",
+          "image": "bazq-wall2_pole.png",
+          "tags": ["pole", "support", "structure"],
+          "category": "poles",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-wall2_sign11",
+          "name": "Sign 1-1",
+          "image": "bazq-wall2_sign11.png",
+          "tags": ["sign", "decoration", "wall-attachment"],
+          "category": "signs",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-wall2_signpole",
+              "offset": {"x": 0, "y": 0.03, "z": 0},
+              "heading_offset": 0
+            }
+          ]
+        },
+        {
+          "prop": "bazq-wall2_sign12",
+          "name": "Sign 1-2",
+          "image": "bazq-wall2_sign12.png",
+          "tags": ["sign", "decoration", "wall-attachment"],
+          "category": "signs",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-wall2_signpole",
+              "offset": {"x": 0, "y": 0.03, "z": 0},
+              "heading_offset": 0
+            }
+          ]
+        },
+        {
+          "prop": "bazq-wall2_sign21",
+          "name": "Sign 2-1",
+          "image": "bazq-wall2_sign21.png",
+          "tags": ["sign", "decoration", "wall-attachment"],
+          "category": "signs",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-wall2_signpole",
+              "offset": {"x": 0, "y": 0.03, "z": 0},
+              "heading_offset": 0
+            }
+          ]
+        },
+        {
+          "prop": "bazq-wall2_sign22",
+          "name": "Sign 2-2",
+          "image": "bazq-wall2_sign22.png",
+          "tags": ["sign", "decoration", "wall-attachment"],
+          "category": "signs",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-wall2_signpole",
+              "offset": {"x": 0, "y": 0.03, "z": 0},
+              "heading_offset": 0
+            }
+          ]
+        },
+        {
+          "prop": "bazq-wall2_sign31",
+          "name": "Sign 3-1",
+          "image": "bazq-wall2_sign31.png",
+          "tags": ["sign", "decoration", "wall-attachment"],
+          "category": "signs",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-wall2_signpole",
+              "offset": {"x": 0, "y": 0.03, "z": 0},
+              "heading_offset": 0
+            }
+          ]
+        },
+        {
+          "prop": "bazq-wall2_sign32",
+          "name": "Sign 3-2",
+          "image": "bazq-wall2_sign32.png",
+          "tags": ["sign", "decoration", "wall-attachment"],
+          "category": "signs",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-wall2_signpole",
+              "offset": {"x": 0, "y": 0.03, "z": 0},
+              "heading_offset": 0
+            }
+          ]
+        },
+        {
+          "prop": "bazq-wall2_walldecal1",
+          "name": "Wall Decal 1",
+          "image": "bazq-wall2_walldecal1.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal2",
+          "name": "Wall Decal 2",
+          "image": "bazq-wall2_walldecal2.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal3",
+          "name": "Wall Decal 3",
+          "image": "bazq-wall2_walldecal3.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal4",
+          "name": "Wall Decal 4",
+          "image": "bazq-wall2_walldecal4.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal5",
+          "name": "Wall Decal 5",
+          "image": "bazq-wall2_walldecal5.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal6",
+          "name": "Wall Decal 6",
+          "image": "bazq-wall2_walldecal6.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal7",
+          "name": "Wall Decal 7",
+          "image": "bazq-wall2_walldecal7.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal8",
+          "name": "Wall Decal 8",
+          "image": "bazq-wall2_walldecal8.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal9",
+          "name": "Wall Decal 9",
+          "image": "bazq-wall2_walldecal9.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_walldecal10",
+          "name": "Wall Decal 10",
+          "image": "bazq-wall2_walldecal10.png",
+          "tags": ["decal", "decoration", "wall-attachment"],
+          "category": "decals",
+          "multiple_spawn": false,
+          "requires_wall": true
+        },
+        {
+          "prop": "bazq-wall2_wallfence",
+          "name": "Wall Fence",
+          "image": "bazq-wall2_wallfence.png",
+          "tags": ["fence", "decoration", "wall-attachment"],
+          "category": "fences",
+          "multiple_spawn": false,
+          "requires_wall": true
+        }
+      ]
+    },
+    "tents_package": {
+      "name": "Tents Package",
+      "description": "Various tent structures and camping equipment",
+      "icon": "fas fa-campground",
+      "objects": [
+        {
+          "prop": "bazq-tent1a",
+          "name": "Tent 1A",
+          "image": "bazq-tent1a.png",
+          "tags": ["tent", "camping", "shelter"],
+          "category": "tents",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-tent1b",
+          "name": "Tent 1B",
+          "image": "bazq-tent1b.png",
+          "tags": ["tent", "camping", "shelter"],
+          "category": "tents",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-tent1c",
+          "name": "Tent 1C",
+          "image": "bazq-tent1c.png",
+          "tags": ["tent", "camping", "shelter"],
+          "category": "tents",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-tent2a",
+          "name": "Tent 2A",
+          "image": "bazq-tent2a.png",
+          "tags": ["tent", "camping", "shelter"],
+          "category": "tents",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-tent2b",
+          "name": "Tent 2B",
+          "image": "bazq-tent2b.png",
+          "tags": ["tent", "camping", "shelter"],
+          "category": "tents",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-tent2c",
+          "name": "Tent 2C",
+          "image": "bazq-tent2c.png",
+          "tags": ["tent", "camping", "shelter"],
+          "category": "tents",
+          "multiple_spawn": false
+        }
+      ]
+    },
+    "crashed_air": {
+      "name": "Crashed Air",
+      "description": "Crashed aircraft and helicopter wreckage",
+      "icon": "fas fa-helicopter",
+      "objects": [
+        {
+          "prop": "bazq-crashedbw",
+          "name": "Crashed Helicopter #1",
+          "image": "bazq-crashedbw.png",
+          "tags": ["crashed", "helicopter", "wreckage", "military"],
+          "category": "aircraft",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-crashedsn_front",
+          "name": "Crashed Helicopter #2 Front",
+          "image": "bazq-crashedsn_front.png",
+          "tags": ["crashed", "helicopter", "wreckage", "front"],
+          "category": "aircraft",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-crashedsn_rear",
+          "name": "Crashed Helicopter #2 Rear",
+          "image": "bazq-crashedsn_rear.png",
+          "tags": ["crashed", "helicopter", "wreckage", "rear"],
+          "category": "aircraft",
+          "multiple_spawn": false
+        },
+        {
+          "prop": "bazq-crashedplane",
+          "name": "Crashed Plane",
+          "image": "bazq-crashedplane.png",
+          "tags": ["crashed", "plane", "aircraft", "wreckage"],
+          "category": "aircraft",
+          "multiple_spawn": false
+        }
+      ]
+    },
+    "subscriber": {
+      "name": "Subscriber Pack",
+      "description": "Premium package with access to all objects",
+      "icon": "fas fa-crown",
+      "objects": [
+        {
+          "prop": "bazq-kule1",
+          "name": "Tower 1",
+          "image": "bazq-kule1.png",
+          "tags": ["tower", "structure", "premium"],
+          "category": "towers",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-kule_int-col",
+              "offset": {"x": 0, "y": 0, "z": 0},
+              "heading_offset": 0,
+              "type": "interior"
+            }
+          ]
+        },
+        {
+          "prop": "bazq-kule2",
+          "name": "Tower 2",
+          "image": "bazq-kule2.png",
+          "tags": ["tower", "structure", "premium"],
+          "category": "towers",
+          "multiple_spawn": true,
+          "additional_objects": [
+            {
+              "prop": "bazq-kule_int",
+              "offset": {"x": 0, "y": 0, "z": 0},
+              "heading_offset": 0,
+              "type": "interior"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "categories": {
+    "walls": {
+      "name": "Walls",
+      "icon": "fas fa-building",
+      "color": "#4CAF50"
+    },
+    "doors": {
+      "name": "Doors & Gates",
+      "icon": "fas fa-door-open",
+      "color": "#2196F3"
+    },
+    "towers": {
+      "name": "Towers",
+      "icon": "fas fa-chess-rook",
+      "color": "#FF9800"
+    },
+    "tents": {
+      "name": "Tents",
+      "icon": "fas fa-campground",
+      "color": "#795548"
+    },
+    "signs": {
+      "name": "Signs",
+      "icon": "fas fa-sign",
+      "color": "#9C27B0"
+    },
+    "decals": {
+      "name": "Decals",
+      "icon": "fas fa-paint-brush",
+      "color": "#E91E63"
+    },
+    "fences": {
+      "name": "Fences",
+      "icon": "fas fa-border-style",
+      "color": "#607D8B"
+    },
+    "poles": {
+      "name": "Poles",
+      "icon": "fas fa-flag-checkered",
+      "color": "#FFC107"
+    },
+    "aircraft": {
+      "name": "Aircraft",
+      "icon": "fas fa-plane",
+      "color": "#2d3748"
+    }
+  },
+  "config": {
+    "version": "2.10",
+    "last_updated": "2025-05-30",
+    "image_path": "html/images/",
+    "default_category": "misc"
+  }
+}
