@@ -696,19 +696,18 @@ RegisterNUICallback('escapePressed', function(data, cb)
         isMenuLoading = false  -- Reset loading state
         -- Clear highlights when closing menu
         ClearAllHighlights()
+        if placing then
+            CancelPlacing(false)
+        end
         DebugLog("MENU", "Menu closed via Escape - isMenuOpen:" .. tostring(isMenuOpen) .. " isMenuLoading:" .. tostring(isMenuLoading))
-    elseif editingObjectData then 
-        CancelKeyboardEdit(true) 
+    elseif editingObjectData then
+        CancelKeyboardEdit(true)
     end
     cb('ok')
 end)
 
 RegisterNUICallback('cancelPlacement', function(_, cb)
-    CancelPlacing()
-    SetNuiFocus(false, false)
-    SendNUIMessage({action = 'close'})
-    isMenuOpen = false  -- Reset menu state
-    isMenuLoading = false  -- Reset loading state
+    CancelPlacing(false)
     cb('ok')
 end)
 
@@ -918,6 +917,9 @@ RegisterNUICallback('closeMenu', function(data, cb)
     isMenuLoading = false  -- Reset loading state
     -- Clear highlights when closing menu
     ClearAllHighlights()
+    if placing then
+        CancelPlacing(false)
+    end
     DebugLog("MENU", "Menu closed via closeMenu callback - isMenuOpen:" .. tostring(isMenuOpen) .. " isMenuLoading:" .. tostring(isMenuLoading))
     cb('ok')
 end)
@@ -1576,26 +1578,47 @@ function StartPlacingObject(modelName)
     end)
 end
 
-function CancelPlacing()
+function CancelPlacing(shouldReopenMenu)
+    if shouldReopenMenu == nil then shouldReopenMenu = true end
+
+    local tempEntityExists = objectEntity and DoesEntityExist(objectEntity)
+
     placing=false
     DebugLog("PLACEMENT", "PLACEMENT CANCELLED - placing set to FALSE, re-enabling combat")
-    
+
     -- Re-enable combat capabilities
     local playerPed = PlayerPedId()
     SetPedCanSwitchWeapon(playerPed, true)   -- Re-enable weapon switching
     DisablePlayerFiring(PlayerId(), false)  -- Re-enable firing
     SetPlayerCanDoDriveBy(PlayerId(), true)  -- Re-enable drive-by shooting
     SetEntityProofs(playerPed, false, false, false, false, false, false, false, false)  -- Remove bullet proof
-    if objectEntity and DoesEntityExist(objectEntity) then
+    if tempEntityExists then
         -- Clean up visual effects before deleting
         ResetEntityAlpha(objectEntity)
         SetEntityDrawOutline(objectEntity, false)
         SetEntityRenderScorched(objectEntity, false)
         DeleteEntity(objectEntity)
     end
+
     objectEntity=nil;selectedObject=nil
+    manualHeightAdjusted = false
     SendNUIMessage({action = 'editingModeUpdate', editingActive = false})
-    
+
+    -- Always reset UI state so controls don't remain blocked
+    SetNuiFocus(false, false)
+    isMenuOpen = false
+    isMenuLoading = false
+
+    if not shouldReopenMenu then
+        SendNUIMessage({action = 'close'})
+        return
+    end
+
+    -- If there was no placement session active, do not reopen the menu
+    if not tempEntityExists and not editingObjectData then
+        return
+    end
+
     -- Auto-return to menu after placement cancellation
     Citizen.SetTimeout(300, function()
         if not placing and not editingObjectData then

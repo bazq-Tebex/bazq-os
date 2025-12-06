@@ -1259,9 +1259,17 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // Helper functions for UI updates
   function populateObjectList(objects, storeAsAllObjects = false) {
-    console.log("Populating object list with", objects.length, "objects");
-    addLogEntry(`Loading ${objects.length} objects into library...`, 'info');
+    const uniqueObjects = Array.from(new Set(objects || []));
+    const duplicateCount = (objects?.length || 0) - uniqueObjects.length;
+
+    console.log("Populating object list with", uniqueObjects.length, "unique objects");
+    if (duplicateCount > 0) {
+      addLogEntry(`Removed ${duplicateCount} duplicate objects from library data`, 'warning');
+    }
+    addLogEntry(`Loading ${uniqueObjects.length} objects into library...`, 'info');
     
+    objects = uniqueObjects;
+
     // Store objects for search functionality if this is the initial load
     if (storeAsAllObjects) {
       allObjects = [...objects];
