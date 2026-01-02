@@ -553,7 +553,7 @@
     }
   },
   "config": {
-    "version": "2.10",
+    "version": "2.3.0",
     "last_updated": "2025-05-30",
     "image_path": "html/images/",
     "default_category": "misc"

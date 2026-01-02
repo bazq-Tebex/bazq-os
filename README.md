@@ -2,7 +2,7 @@
 
 Professional object spawning and building system for FiveM servers. Place, edit, and manage objects with advanced tools and user management.
 
-![Version](https://img.shields.io/badge/version-2.2.0-green.svg)
+![Version](https://img.shields.io/badge/version-2.3.0-green.svg)
 ![Platform](https://img.shields.io/badge/platform-FiveM-blue.svg)
 
 ## 🔗 Support & Store
@@ -39,10 +39,16 @@ Contact your server admin for permissions. You need **Owner**, **Admin**, or **M
 - **Recent Props** - Quick access to recently used models
 
 ### 🏗️ Building Tools
+- **Teleport to Object** - Instantly jump to any placed object
 - **Real-Time Editing** - Move and rotate placed objects
 - **Ground Snapping** - Auto-align objects to ground
 - **Precision Controls** - Fine-tune positioning with keyboard
 - **Freecam Mode** - Build from any angle with extended camera
+
+### 🛠️ Advanced Tools
+- **JSON to YMAP** - Included Python converter with GUI `json2ymap`
+- **Performance Safety** - Auto-alert for high object counts (>500)
+- **Stability System** - Strict Z-locking preventing object drift
 
 ### 👥 User Management
 - **Role System** - Owner > Admin > Mapper hierarchy

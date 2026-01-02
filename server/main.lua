@@ -2,55 +2,12 @@
 -- DEBUG SYSTEM CONFIGURATION (SERVER)
 -- ================================
 -- Load debug configuration
+-- Debug system configuration
 local debugConfig = nil
-local function LoadDebugConfig()
-    local configFile = LoadResourceFile(GetCurrentResourceName(), "debug_config.lua")
-    if configFile then
-        local chunk, err = load(configFile)
-        if chunk then
-            local success, config = pcall(chunk)
-            if success and config then
-                debugConfig = config
-                print("[OP-SERVER] Debug config loaded from debug_config.lua")
-                if config.userManagement then
-                    print("[OP-SERVER] UserManagement config - AutoPromote: " .. tostring(config.userManagement.autoPromoteFirstUser))
-                end
-                return true
-            else
-                print("[OP-SERVER] ERROR: Failed to execute debug config: " .. tostring(config))
-            end
-        else
-            print("[OP-SERVER] ERROR: Failed to load debug config: " .. tostring(err))
-        end
-    else
-        print("[OP-SERVER] WARNING: debug_config.lua not found on server, using defaults")
-    end
-    
-    -- Fallback to default config
-    debugConfig = {
-        enabled = true,
-        levels = {
-            USER = true,
-            SAVE = true,
-            LOADING = true,
-            GENERAL = true
-        },
-        format = {
-            use_timestamps = false,
-            prefix = "[OP-SERVER-DEBUG]"
-        },
-        userManagement = { autoPromoteFirstUser = false, requireApproval = false }
-    }
-    print("[OP-SERVER] Using default debug config")
-    return false
-end
 
--- Initialize debug config
-LoadDebugConfig()
-
--- Debug functions for server
-local function DebugPrint(level, message)
-    if debugConfig.enabled and debugConfig.levels[level] then
+-- Debug function - only prints when debug is enabled (unified)
+local function DebugLog(level, message)
+    if debugConfig and debugConfig.enabled and debugConfig.levels[level] then
         local prefix = debugConfig.format.prefix .. "-" .. level
         if debugConfig.format.use_timestamps then
             local time = os.date("%H:%M:%S")
@@ -58,6 +15,67 @@ local function DebugPrint(level, message)
         end
         print(prefix .. " " .. message)
     end
+end
+
+-- Alias for backwards compatibility within file
+local function DebugPrint(level, message)
+    DebugLog(level, message)
+end
+
+local function LoadDebugConfig()
+    -- Minimal initial loading
+    local configFile = LoadResourceFile(GetCurrentResourceName(), "debug_config.lua")
+    if configFile then
+        local conf = nil
+        
+        -- Try load as-is
+        local loadFunc, err = load(configFile)
+        if loadFunc then
+            local ok, result = pcall(loadFunc)
+            if ok and result then
+                conf = result
+            end
+        end
+        
+        -- Try existing "return" fallback
+        if not conf then
+            local loadFunc2, err2 = load("return " .. configFile)
+            if loadFunc2 then
+                local ok, result = pcall(loadFunc2)
+                if ok and result then
+                    conf = result
+                end
+            end
+        end
+        
+        if conf then
+            debugConfig = conf
+            DebugLog("CONFIG", "Debug config loaded successfully")
+            if conf.userManagement then
+                DebugLog("USER", "UserManagement config loaded")
+            end
+            return true
+        end
+    end
+    
+    -- Fallback to default SILENT config
+    debugConfig = {
+        enabled = false,
+        levels = {
+            USER = true,
+            SAVE = true,
+            LOADING = true,
+            GENERAL = true,
+            SERVER = true
+        },
+        format = {
+            use_timestamps = false,
+            prefix = "[OP-SERVER-DEBUG]"
+        },
+        userManagement = { autoPromoteFirstUser = false, requireApproval = false }
+    }
+    print("[bazq-os] [WARN] debug_config.lua not found/failed - defaulting to SILENT mode.")
+    return false
 end
 
 -- Debug config already loaded above
@@ -192,9 +210,14 @@ local function DebugSave(msg) DebugPrint("SAVE", msg) end
 local function DebugLoading(msg) DebugPrint("LOADING", msg) end
 local function DebugGeneral(msg) DebugPrint("GENERAL", msg) end
 local function OPLog(message)
-    -- Use SERVER debug level for general server operations
-    DebugPrint("SERVER", message:gsub("%[ObjectPlacer%] SERVER[:%s]*", ""))
+    -- Remove old prefix if present and log as SERVER level
+    local cleanMsg = message:gsub("%[ObjectPlacer%] SERVER[:%s]*", "")
+    cleanMsg = cleanMsg:gsub("%[ObjectPlacer%] ", "")
+    DebugLog("SERVER", cleanMsg)
 end
+
+-- Initialize debug config
+LoadDebugConfig()
 
 -- ================================
 -- SCRIPT CONFIGURATION
@@ -553,7 +576,7 @@ local function GetUserRole(identifier)
         osAdminData.userManagement.users = userManagementData.users
         SaveOsAdminToFile()
         
-        print("[User Management] Auto-promoted first user to owner: " .. identifier)
+        DebugLog("USER", "Auto-promoted first user to owner: " .. identifier)
         return "owner"
     end
     
@@ -674,7 +697,7 @@ AddEventHandler("bazq-objectplace:getUserList", function()
     local role = GetUserRole(identifier)
     
     if not HasPermission(src, "user_management") then
-        print("[User Management] Access denied to " .. GetPlayerName(src) .. " - insufficient permissions")
+        DebugLog("USER", "Access denied to " .. GetPlayerName(src) .. " - insufficient permissions")
         return
     end
     
@@ -742,7 +765,7 @@ AddEventHandler("bazq-objectplace:addUser", function(userData)
     osAdminData.userManagement.users = userManagementData.users
     SaveOsAdminToFile()
     
-    print("[User Management] User added: " .. userData.displayName .. " (" .. userData.identifier .. ") as " .. userData.role .. " by " .. GetPlayerName(src))
+    DebugLog("USER", "User added: " .. userData.displayName .. " (" .. userData.identifier .. ") as " .. userData.role .. " by " .. GetPlayerName(src))
     
     TriggerClientEvent("bazq-objectplace:userActionResponse", src, {
         success = true,
@@ -833,7 +856,7 @@ AddEventHandler("bazq-objectplace:updateUserRole", function(data)
     osAdminData.userManagement.users = userManagementData.users
     SaveOsAdminToFile()
     
-    print("[User Management] Role updated: " .. targetUser.displayName .. " from " .. oldRole .. " to " .. data.newRole .. " by " .. GetPlayerName(src))
+    DebugLog("USER", "Role updated: " .. targetUser.displayName .. " from " .. oldRole .. " to " .. data.newRole .. " by " .. GetPlayerName(src))
     
     TriggerClientEvent("bazq-objectplace:userActionResponse", src, {
         success = true,
@@ -849,7 +872,7 @@ AddEventHandler("bazq-objectplace:updateUser", function(originalIdentifier, newD
     
     -- Check permissions
     if not adminRole or (adminRole ~= "admin" and adminRole ~= "owner") then
-        print("[User Management] Update denied - " .. GetPlayerName(src) .. " (role: " .. (adminRole or "none") .. ") attempted to update user " .. originalIdentifier)
+        DebugLog("USER", "Update denied - " .. GetPlayerName(src) .. " (role: " .. (adminRole or "none") .. ") attempted to update user " .. originalIdentifier)
         TriggerClientEvent("bazq-objectplace:userActionResponse", src, {
             success = false,
             message = "Access denied. Admin or Owner role required."
@@ -929,7 +952,7 @@ AddEventHandler("bazq-objectplace:updateUser", function(originalIdentifier, newD
     -- Save to file
     local success = SaveUsersToFile(users)
     if success then
-        print("[User Management] User updated: " .. originalIdentifier .. " → " .. newDisplayName .. " (" .. newIdentifier .. ", " .. newRole .. ") by " .. GetPlayerName(src))
+        DebugLog("USER", "User updated: " .. originalIdentifier .. " → " .. newDisplayName .. " (" .. newIdentifier .. ", " .. newRole .. ") by " .. GetPlayerName(src))
         
         -- Broadcast updated user list to all admins
         for _, playerId in ipairs(GetPlayers()) do
@@ -1026,7 +1049,7 @@ AddEventHandler("bazq-objectplace:deleteUser", function(data)
     osAdminData.userManagement.users = userManagementData.users
     SaveOsAdminToFile()
     
-    print("[User Management] User deleted: " .. deletedUser.displayName .. " (" .. deletedUser.identifier .. ") by " .. GetPlayerName(src))
+    DebugLog("USER", "User deleted: " .. deletedUser.displayName .. " (" .. deletedUser.identifier .. ") by " .. GetPlayerName(src))
     
     TriggerClientEvent("bazq-objectplace:userActionResponse", src, {
         success = true,
@@ -1058,7 +1081,7 @@ AddEventHandler("bazq-objectplace:clearAllMappers", function()
     osAdminData.userManagement.users = userManagementData.users
     SaveOsAdminToFile()
     
-    print("[User Management] Cleared " .. mappersRemoved .. " mapper(s) by " .. GetPlayerName(src))
+    DebugLog("USER", "Cleared " .. mappersRemoved .. " mapper(s) by " .. GetPlayerName(src))
     
     TriggerClientEvent("bazq-objectplace:userActionResponse", src, {
         success = true,
@@ -1492,7 +1515,7 @@ function DetectServerTimezone()
     
     serverTimezone = timezoneMap[offsetHours] or ("UTC" .. (offsetHours >= 0 and "+" or "") .. offsetHours)
     
-    print("[BAZQ-OS] Server timezone detected: " .. serverTimezone .. " (UTC" .. (offsetHours >= 0 and "+" or "") .. offsetHours .. ")" .. (isDST and " [DST Active]" or " [Standard Time]"))
+    DebugLog("SERVER", "Server timezone detected: " .. serverTimezone .. " (UTC" .. (offsetHours >= 0 and "+" or "") .. offsetHours .. ")" .. (isDST and " [DST Active]" or " [Standard Time]"))
 end
 
 -- Detect timezone on resource start

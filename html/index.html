@@ -1,22 +1,34 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Object Placer</title>
-  <link rel="stylesheet" href="style.css"/>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto:wght@400;500;700&display=swap"
+    rel="stylesheet">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 </head>
+
 <body>
   <div class="ui-container">
     <div class="ui-header">
       <h1 class="ui-title"><span class="bazq-text">bazq</span><span class="os-text">-os</span></h1>
-      <span class="ui-version" id="uiVersion">v2.2.0</span>
+      <span class="ui-version" id="uiVersion">v2.3.0</span>
     </div>
     <button id="closeUiBtn" class="close-ui-button" title="Close Menu">
       <i class="fas fa-times"></i>
     </button>
+
+    <!-- Performance Warning Banner -->
+    <div id="performanceWarning" class="performance-warning hidden">
+      <i class="fas fa-exclamation-triangle"></i>
+      <span id="performanceWarningText">Warning: High object count (>1500). Performance may degrade. Please convert to
+        YMAP.</span>
+    </div>
+
     <div class="main-container">
       <div class="icon-sidebar">
         <button id="navLibraryBtn" class="nav-button active-nav" title="Object Library">
@@ -34,7 +46,7 @@
         <button id="navUsersBtn" class="nav-button" title="User Management">
           <i class="fas fa-users"></i>
         </button>
-        
+
         <button id="setDayBtn" class="nav-button" title="Set Sunny Day (12:00 PM)">
           <i class="fas fa-sun"></i>
         </button>
@@ -53,126 +65,129 @@
       </div>
 
       <div class="main-view-area">
-      <!-- Library View -->
-      <div id="libraryView" class="view-panel active-view">
-        <div class="sidebar-header">
-          <h2>Object Library</h2>
-          <div class="search-container enhanced-search">
-            <i class="fas fa-search search-icon"></i>
-            <input type="text" id="searchBar" placeholder="Search objects (e.g., tent, wall, gate)..." autocomplete="off" spellcheck="false">
-            <button id="clearSearchBtn" class="clear-search-btn" title="Clear search">
-              <i class="fas fa-times"></i>
-            </button>
+        <!-- Library View -->
+        <div id="libraryView" class="view-panel active-view">
+          <div class="sidebar-header">
+            <h2>Object Library</h2>
+            <div class="search-container enhanced-search">
+              <i class="fas fa-search search-icon"></i>
+              <input type="text" id="searchBar" placeholder="Search objects (e.g., tent, wall, gate)..."
+                autocomplete="off" spellcheck="false">
+              <button id="clearSearchBtn" class="clear-search-btn" title="Clear search">
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+            <div class="search-suggestions" id="librarySearchSuggestions">
+              <!-- Search suggestions will appear here -->
+            </div>
+            <div class="filter-buttons">
+              <button id="filterAll" class="filter-btn active-filter">All</button>
+              <button id="filterTents" class="filter-btn">🏕️ Tents</button>
+              <button id="filterWalls" class="filter-btn">🧱 Walls</button>
+              <button id="filterTowers" class="filter-btn">🗼 Towers</button>
+              <button id="filterGates" class="filter-btn">🚪 Gates</button>
+              <button id="filterSigns" class="filter-btn">🪧 Signs</button>
+              <button id="filterDecals" class="filter-btn">🎨 Decals</button>
+              <button id="filterFences" class="filter-btn">🚧 Fences</button>
+              <button id="filterPoles" class="filter-btn">📍 Poles</button>
+              <button id="filterAircraft" class="filter-btn">🚁 Aircraft</button>
+            </div>
           </div>
-          <div class="search-suggestions" id="librarySearchSuggestions">
-            <!-- Search suggestions will appear here -->
-          </div>
-          <div class="filter-buttons">
-            <button id="filterAll" class="filter-btn active-filter">All</button>
-            <button id="filterTents" class="filter-btn">🏕️ Tents</button>
-            <button id="filterWalls" class="filter-btn">🧱 Walls</button>
-            <button id="filterTowers" class="filter-btn">🗼 Towers</button>
-            <button id="filterGates" class="filter-btn">🚪 Gates</button>
-            <button id="filterSigns" class="filter-btn">🪧 Signs</button>
-            <button id="filterDecals" class="filter-btn">🎨 Decals</button>
-            <button id="filterFences" class="filter-btn">🚧 Fences</button>
-            <button id="filterPoles" class="filter-btn">📍 Poles</button>
-            <button id="filterAircraft" class="filter-btn">🚁 Aircraft</button>
+          <div class="object-list">
+            <!-- Items will be dynamically inserted here by JavaScript -->
           </div>
         </div>
-        <div class="object-list">
-          <!-- Items will be dynamically inserted here by JavaScript -->
-        </div>
-      </div>
 
-      <!-- Manual Spawner View -->
-      <div id="manualSpawnerView" class="view-panel">
-        <div class="sidebar-header">
-          <h2>Manual Object Spawner</h2>
-          <p class="manual-subtitle">Enter any prop/model name to spawn</p>
-        </div>
-        
-        <div class="manual-spawner-container">
-          <div class="input-group manual-input-group">
-            <label for="manualPropInput">Prop/Model Name:</label>
-            <input type="text" id="manualPropInput" placeholder="e.g., prop_chair_01a, adder, prop_tree_oak_01..." autocomplete="off" spellcheck="false">
-            <button id="spawnManualPropBtn" class="spawn-manual-btn">
-              <i class="fas fa-plus"></i>
-              Spawn Object
-            </button>
+        <!-- Manual Spawner View -->
+        <div id="manualSpawnerView" class="view-panel">
+          <div class="sidebar-header">
+            <h2>Manual Object Spawner</h2>
+            <p class="manual-subtitle">Enter any prop/model name to spawn</p>
           </div>
-          
-          <div class="placement-options">
-            <h3>Placement Options</h3>
-            <div class="option-item">
-              <label for="manualSnapToGround">Snap to Ground:</label>
-              <input type="checkbox" id="manualSnapToGround" checked>
+
+          <div class="manual-spawner-container">
+            <div class="input-group manual-input-group">
+              <label for="manualPropInput">Prop/Model Name:</label>
+              <input type="text" id="manualPropInput" placeholder="e.g., prop_chair_01a, adder, prop_tree_oak_01..."
+                autocomplete="off" spellcheck="false">
+              <button id="spawnManualPropBtn" class="spawn-manual-btn">
+                <i class="fas fa-plus"></i>
+                Spawn Object
+              </button>
             </div>
-          </div>
-          
-          <div class="recent-props-section">
-            <h3>Recent Props</h3>
-            <div class="recent-props-grid" id="recentPropsGrid">
-              <div class="no-recent-props">No recent props yet. Start spawning objects to see them here!</div>
-            </div>
-          </div>
-          
-          <div class="manual-help-section">
-            <div class="help-header collapsible-header" id="helpHeader">
-              <div class="help-header-content">
-                <i class="fas fa-chevron-down expand-icon"></i>
-                <h3>Help & Tips</h3>
+
+            <div class="placement-options">
+              <h3>Placement Options</h3>
+              <div class="option-item">
+                <label for="manualSnapToGround">Snap to Ground:</label>
+                <input type="checkbox" id="manualSnapToGround" checked>
               </div>
             </div>
-            <div class="help-content collapsible-content" id="helpContent">
-              <p><strong>How to use:</strong></p>
-              <ul>
-                <li>Type any GTA V prop/model name in the input field</li>
-                <li>Click "Spawn Object" or press Enter to place it</li>
-                <li>Use the recent props buttons for quick access</li>
-                <li>Model names are case-sensitive</li>
-              </ul>
-              
-              <p><strong>Examples:</strong></p>
-              <ul>
-                <li><code>prop_chair_01a</code> - Basic chair</li>
-                <li><code>adder</code> - Adder supercar</li>
-                <li><code>prop_tree_pine_01</code> - Pine tree</li>
-                <li><code>prop_container_01a</code> - Shipping container</li>
-              </ul>
-              
-              <p><strong>Tips:</strong></p>
-              <ul>
-                <li>Most props start with "prop_"</li>
-                <li>Vehicle names are usually just the model name</li>
-                <li>Check online GTA V model databases for more names</li>
-                <li>Invalid models will show an error message</li>
-              </ul>
+
+            <div class="recent-props-section">
+              <h3>Recent Props</h3>
+              <div class="recent-props-grid" id="recentPropsGrid">
+                <div class="no-recent-props">No recent props yet. Start spawning objects to see them here!</div>
+              </div>
+            </div>
+
+            <div class="manual-help-section">
+              <div class="help-header collapsible-header" id="helpHeader">
+                <div class="help-header-content">
+                  <i class="fas fa-chevron-down expand-icon"></i>
+                  <h3>Help & Tips</h3>
+                </div>
+              </div>
+              <div class="help-content collapsible-content" id="helpContent">
+                <p><strong>How to use:</strong></p>
+                <ul>
+                  <li>Type any GTA V prop/model name in the input field</li>
+                  <li>Click "Spawn Object" or press Enter to place it</li>
+                  <li>Use the recent props buttons for quick access</li>
+                  <li>Model names are case-sensitive</li>
+                </ul>
+
+                <p><strong>Examples:</strong></p>
+                <ul>
+                  <li><code>prop_chair_01a</code> - Basic chair</li>
+                  <li><code>adder</code> - Adder supercar</li>
+                  <li><code>prop_tree_pine_01</code> - Pine tree</li>
+                  <li><code>prop_container_01a</code> - Shipping container</li>
+                </ul>
+
+                <p><strong>Tips:</strong></p>
+                <ul>
+                  <li>Most props start with "prop_"</li>
+                  <li>Vehicle names are usually just the model name</li>
+                  <li>Check online GTA V model databases for more names</li>
+                  <li>Invalid models will show an error message</li>
+                </ul>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- Placed Objects View -->
-      <div id="placedObjectsView" class="view-panel">
-        <div class="sidebar-header">
-          <div class="placed-objects-header">
-            <h2>Placed Objects</h2>
-            <button id="expandPlacedViewBtn" class="expand-view-btn" title="Expand view for better visibility">
-              <i class="fas fa-expand-arrows-alt"></i>
-            </button>
-          </div>
-          <div class="search-container enhanced-search">
-            <i class="fas fa-search search-icon"></i>
-            <input type="text" id="placedSearchBar" placeholder="Search placed objects..." autocomplete="off" spellcheck="false">
-            <button id="placedClearSearchBtn" class="clear-search-btn" title="Clear search">
-              <i class="fas fa-times"></i>
-            </button>
-          </div>
-          <div class="search-suggestions" id="placedSearchSuggestions">
-            <!-- Search suggestions will appear here -->
-          </div>
-          <!-- OLD FILTER BUTTONS - Commented out since grouping system is more powerful
+        <!-- Placed Objects View -->
+        <div id="placedObjectsView" class="view-panel">
+          <div class="sidebar-header">
+            <div class="placed-objects-header">
+              <h2>Placed Objects</h2>
+              <button id="expandPlacedViewBtn" class="expand-view-btn" title="Expand view for better visibility">
+                <i class="fas fa-expand-arrows-alt"></i>
+              </button>
+            </div>
+            <div class="search-container enhanced-search">
+              <i class="fas fa-search search-icon"></i>
+              <input type="text" id="placedSearchBar" placeholder="Search placed objects..." autocomplete="off"
+                spellcheck="false">
+              <button id="placedClearSearchBtn" class="clear-search-btn" title="Clear search">
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+            <div class="search-suggestions" id="placedSearchSuggestions">
+              <!-- Search suggestions will appear here -->
+            </div>
+            <!-- OLD FILTER BUTTONS - Commented out since grouping system is more powerful
           <div class="filter-buttons">
             <button id="placedFilterAll" class="filter-btn active-filter">All</button>
             <button id="placedFilterBazq" class="filter-btn">🏷️ bazq</button>
@@ -185,184 +200,217 @@
             <button id="placedFilterProps" class="filter-btn">📋 Props</button>
           </div>
           -->
-          
-          <div class="grouping-controls">
-            <label for="primaryGroupSelect" class="group-label">📊 Primary Group:</label>
-            <select id="primaryGroupSelect" class="group-select">
-              <option value="none">No Grouping</option>
-              <option value="player">👤 Player</option>
-              <option value="type">🏷️ Item Type</option>
-              <option value="date">📅 Date</option>
-              <option value="proximity">📍 Proximity</option>
-            </select>
-            
-            <label for="secondaryGroupSelect" class="group-label">🔗 Then By:</label>
-            <select id="secondaryGroupSelect" class="group-select">
-              <option value="none">None</option>
-              <option value="player">👤 Player</option>
-              <option value="type">🏷️ Item Type</option>
-              <option value="date">📅 Date</option>
-              <option value="proximity">📍 Proximity</option>
-            </select>
-          </div>
-        </div>
-        <div id="placedObjectsList" class="placed-objects-list-container">
-          <!-- Placed objects will be listed here -->
-        </div>
-      </div>
 
-      <!-- Settings View -->
-      <div id="settingsView" class="view-panel">
-        <div class="sidebar-header">
-          <h2>Package Settings</h2>
-          <p class="settings-subtitle">Select your owned <span class="bazq-brand">bazq</span> prop packages</p>
-        </div>
-        <div class="packages-grid">
-          <div class="package-card">
-            <input type="checkbox" id="wallPack1" class="package-checkbox">
-            <label for="wallPack1" class="package-card-label">
-              <i class="fas fa-shield-alt"></i>
-              <span>Wall Pack 1</span>
-            </label>
-          </div>
-          
-          <div class="package-card">
-            <input type="checkbox" id="wallPack2" class="package-checkbox">
-            <label for="wallPack2" class="package-card-label">
-              <i class="fas fa-shield-alt"></i>
-              <span>Wall Pack 2</span>
-            </label>
-          </div>
-          
-          <div class="package-card">
-            <input type="checkbox" id="tentsPack" class="package-checkbox">
-            <label for="tentsPack" class="package-card-label">
-              <i class="fas fa-campground"></i>
-              <span>Tents Package</span>
-            </label>
-          </div>
-          
-          <div class="package-card">
-            <input type="checkbox" id="crashedAirPack" class="package-checkbox">
-            <label for="crashedAirPack" class="package-card-label">
-              <i class="fas fa-helicopter"></i>
-              <span>Crashed Air</span>
-            </label>
-          </div>
-          
-          <div class="package-card">
-            <input type="checkbox" id="subscriberPack" class="package-checkbox">
-            <label for="subscriberPack" class="package-card-label">
-              <i class="fas fa-crown"></i>
-              <span>Subscriber</span>
-            </label>
-          </div>
-        </div>
-        
-        <div class="behavior-settings">
-          <h3 class="settings-section-title">🎛️ Behavior Settings</h3>
-          <div class="setting-item">
-            <label class="setting-label">
-              <input type="checkbox" id="keepMenuOpenAfterPlace" class="setting-checkbox">
-              <span class="checkmark"></span>
-              Keep menu open after placing objects
-            </label>
-            <p class="setting-description">Menu will stay open after placing an object, allowing for quick consecutive placements</p>
-          </div>
-        </div>
-        
-        <div class="settings-actions">
-          <button id="saveSettingsBtn" class="save-settings-btn">
-            <i class="fas fa-save"></i>
-            Save Settings
-          </button>
-        </div>
-      </div>
+            <div class="grouping-controls">
+              <label for="primaryGroupSelect" class="group-label">📊 Primary Group:</label>
+              <select id="primaryGroupSelect" class="group-select">
+                <option value="none">No Grouping</option>
+                <option value="player">👤 Player</option>
+                <option value="type">🏷️ Item Type</option>
+                <option value="date">📅 Date</option>
+                <option value="proximity">📍 Proximity</option>
+              </select>
 
-      <!-- User Management View -->
-      <div id="usersView" class="view-panel">
-        <div class="sidebar-header">
-          <h2>User Management</h2>
-          <p class="user-management-subtitle">Manage user roles: <span class="role-owner">Owner</span> > <span class="role-admin">Admin</span> > <span class="role-mapper">Mapper</span></p>
-        </div>
-        
-        <!-- Add User Section -->
-        <div class="add-user-section">
-          <h3>Add New User</h3>
-          <div class="add-user-form">
-            <div class="input-group">
-                              <label for="newUserIdentifier">User Identifier (Steam/License/FiveM):</label>
-                              <input type="text" id="newUserIdentifier" placeholder="steam:1234567890abcdef, license:abc123..., or fivem:myidentifier" maxlength="100">
-            </div>
-            <div class="input-group">
-              <label for="newUserName">Display Name:</label>
-              <input type="text" id="newUserName" placeholder="Enter display name" maxlength="30">
-            </div>
-            <div class="input-group">
-              <label for="newUserRole">Role:</label>
-              <select id="newUserRole" class="role-select-add">
-                <option value="mapper">🗺️ Mapper</option>
-                <option value="admin">⚙️ Admin</option>
-                <option value="owner">👑 Owner</option>
+              <label for="secondaryGroupSelect" class="group-label">🔗 Then By:</label>
+              <select id="secondaryGroupSelect" class="group-select">
+                <option value="none">None</option>
+                <option value="player">👤 Player</option>
+                <option value="type">🏷️ Item Type</option>
+                <option value="date">📅 Date</option>
+                <option value="proximity">📍 Proximity</option>
               </select>
             </div>
-            <button id="addUserBtn" class="add-user-btn">
-              <i class="fas fa-plus"></i>
-              Add User
-            </button>
+          </div>
+          <div id="placedObjectsList" class="placed-objects-list-container">
+            <!-- Placed objects will be listed here -->
           </div>
         </div>
 
-        <!-- User List Section -->
-        <div class="user-list-section">
-          <div class="user-list-header">
-            <h3>Current Users</h3>
-            <div class="user-stats">
-              <span class="stat-item">👑 <span id="ownerCount">0</span></span>
-              <span class="stat-item">⚙️ <span id="adminCount">0</span></span>
-              <span class="stat-item">🗺️ <span id="mapperCount">0</span></span>
+        <!-- Settings View -->
+        <div id="settingsView" class="view-panel">
+          <div class="behavior-settings">
+            <h3 class="settings-section-title">🎛️ Behavior Settings</h3>
+            <div class="setting-item">
+              <label class="setting-label">
+                <input type="checkbox" id="keepMenuOpenAfterPlace" class="setting-checkbox">
+                <span class="checkmark"></span>
+                Keep menu open after placing objects
+              </label>
+              <p class="setting-description">Menu will stay open after placing an object, allowing for quick consecutive
+                placements</p>
             </div>
-          </div>
-          
-          <div class="search-container enhanced-search">
-            <i class="fas fa-search search-icon"></i>
-            <input type="text" id="userSearchBar" placeholder="Search users..." autocomplete="off" spellcheck="false">
-            <button id="userClearSearchBtn" class="clear-search-btn" title="Clear search">
-              <i class="fas fa-times"></i>
-            </button>
           </div>
 
-          <div class="user-list-container">
-            <div id="userListContent" class="user-list-content">
-              <!-- Users will be populated here -->
+          <div class="behavior-settings">
+            <h3 class="settings-section-title">🎨 Appearance & Performance</h3>
+
+            <div class="setting-item">
+              <label class="setting-label">
+                <input type="checkbox" id="blueThemeCheckbox" class="setting-checkbox">
+                <span class="checkmark"></span>
+                Blue Theme
+              </label>
+              <p class="setting-description">Change the interface main color to Blue.</p>
+            </div>
+
+            <div class="setting-item">
+              <label class="setting-label">
+                <input type="checkbox" id="lowPerformanceCheckbox" class="setting-checkbox">
+                <span class="checkmark"></span>
+                Low Effects Mode
+              </label>
+              <p class="setting-description">Reduces visual effects (blur, shadows, animations) for better performance.
+              </p>
+            </div>
+
+            <div class="setting-item">
+              <label class="setting-label">
+                <input type="checkbox" id="disableLibraryCheckbox" class="setting-checkbox">
+                <span class="checkmark"></span>
+                Disable Object Library
+              </label>
+              <p class="setting-description">Hides the Object Library tab from the sidebar.</p>
             </div>
           </div>
+
+
+
+          <div class="sidebar-header"
+            style="border-top: 1px solid rgba(var(--primary-rgb), 0.3); padding-top: 20px; margin-top: 20px; border-bottom: none;">
+            <h2>Package Management</h2>
+            <p class="settings-subtitle">Manage your <span class="bazq-brand">bazq</span> content packages</p>
+          </div>
+
+          <div class="packages-grid">
+            <div class="package-card">
+              <input type="checkbox" id="wallPack1" class="package-checkbox">
+              <label for="wallPack1" class="package-card-label">
+                <i class="fas fa-shield-alt"></i>
+                <span>Wall Pack 1</span>
+              </label>
+            </div>
+
+            <div class="package-card">
+              <input type="checkbox" id="wallPack2" class="package-checkbox">
+              <label for="wallPack2" class="package-card-label">
+                <i class="fas fa-shield-alt"></i>
+                <span>Wall Pack 2</span>
+              </label>
+            </div>
+
+            <div class="package-card">
+              <input type="checkbox" id="tentsPack" class="package-checkbox">
+              <label for="tentsPack" class="package-card-label">
+                <i class="fas fa-campground"></i>
+                <span>Tents Package</span>
+              </label>
+            </div>
+
+            <div class="package-card">
+              <input type="checkbox" id="crashedAirPack" class="package-checkbox">
+              <label for="crashedAirPack" class="package-card-label">
+                <i class="fas fa-helicopter"></i>
+                <span>Crashed Air</span>
+              </label>
+            </div>
+
+            <div class="package-card">
+              <input type="checkbox" id="subscriberPack" class="package-checkbox">
+              <label for="subscriberPack" class="package-card-label">
+                <i class="fas fa-crown"></i>
+                <span>Subscriber</span>
+              </label>
+            </div>
+          </div>
+          <!-- Package settings and Save button removed -->
         </div>
 
-        <!-- Bulk Actions -->
-        <div class="bulk-actions-section">
-          <div class="bulk-actions-header">
-            <h3>Bulk Actions</h3>
+        <!-- User Management View -->
+        <div id="usersView" class="view-panel">
+          <div class="sidebar-header">
+            <h2>User Management</h2>
+            <p class="user-management-subtitle">Manage user roles: <span class="role-owner">Owner</span> > <span
+                class="role-admin">Admin</span> > <span class="role-mapper">Mapper</span></p>
           </div>
-          <div class="bulk-actions-buttons">
-            <button id="exportUsersBtn" class="bulk-action-btn">
-              <i class="fas fa-download"></i>
-              Export Users
-            </button>
-            <button id="clearAllMappersBtn" class="bulk-action-btn danger">
-              <i class="fas fa-trash-alt"></i>
-              Clear All Mappers
-            </button>
-            <button id="refreshUserListBtn" class="bulk-action-btn">
-              <i class="fas fa-sync-alt"></i>
-              Refresh List
-            </button>
+
+          <!-- Add User Section -->
+          <div class="add-user-section">
+            <h3>Add New User</h3>
+            <div class="add-user-form">
+              <div class="input-group">
+                <label for="newUserIdentifier">User Identifier (Steam/License/FiveM):</label>
+                <input type="text" id="newUserIdentifier"
+                  placeholder="steam:1234567890abcdef, license:abc123..., or fivem:myidentifier" maxlength="100">
+              </div>
+              <div class="input-group">
+                <label for="newUserName">Display Name:</label>
+                <input type="text" id="newUserName" placeholder="Enter display name" maxlength="30">
+              </div>
+              <div class="input-group">
+                <label for="newUserRole">Role:</label>
+                <select id="newUserRole" class="role-select-add">
+                  <option value="mapper">🗺️ Mapper</option>
+                  <option value="admin">⚙️ Admin</option>
+                  <option value="owner">👑 Owner</option>
+                </select>
+              </div>
+              <button id="addUserBtn" class="add-user-btn">
+                <i class="fas fa-plus"></i>
+                Add User
+              </button>
+            </div>
+          </div>
+
+          <!-- User List Section -->
+          <div class="user-list-section">
+            <div class="user-list-header">
+              <h3>Current Users</h3>
+              <div class="user-stats">
+                <span class="stat-item">👑 <span id="ownerCount">0</span></span>
+                <span class="stat-item">⚙️ <span id="adminCount">0</span></span>
+                <span class="stat-item">🗺️ <span id="mapperCount">0</span></span>
+              </div>
+            </div>
+
+            <div class="search-container enhanced-search">
+              <i class="fas fa-search search-icon"></i>
+              <input type="text" id="userSearchBar" placeholder="Search users..." autocomplete="off" spellcheck="false">
+              <button id="userClearSearchBtn" class="clear-search-btn" title="Clear search">
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+
+            <div class="user-list-container">
+              <div id="userListContent" class="user-list-content">
+                <!-- Users will be populated here -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Bulk Actions -->
+          <div class="bulk-actions-section">
+            <div class="bulk-actions-header">
+              <h3>Bulk Actions</h3>
+            </div>
+            <div class="bulk-actions-buttons">
+              <button id="exportUsersBtn" class="bulk-action-btn">
+                <i class="fas fa-download"></i>
+                Export Users
+              </button>
+              <button id="clearAllMappersBtn" class="bulk-action-btn danger">
+                <i class="fas fa-trash-alt"></i>
+                Clear All Mappers
+              </button>
+              <button id="refreshUserListBtn" class="bulk-action-btn">
+                <i class="fas fa-sync-alt"></i>
+                Refresh List
+              </button>
+            </div>
           </div>
         </div>
       </div>
     </div>
-    </div>
-    
+
     <!-- Activity Log Panel -->
     <div class="activity-log">
       <div class="log-header">
@@ -385,7 +433,9 @@
 
   <!-- Keyboard Edit Instructions Panel (Initially Hidden) -->
   <div id="keyboardEditInstructionsPanel" class="keyboard-edit-instructions">
-    <p><strong>EDIT MODE:</strong> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>: Move XY | <kbd>R</kbd>: Up, <kbd>F</kbd>: Down | <kbd>Q</kbd><kbd>E</kbd>: Rotate | <kbd>ENTER</kbd>: Save | <kbd>ESC</kbd>: Cancel</p>
+    <p><strong>EDIT MODE:</strong> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>: Move XY | <kbd>R</kbd>: Up,
+      <kbd>F</kbd>: Down | <kbd>Q</kbd><kbd>E</kbd>: Rotate | <kbd>ENTER</kbd>: Save | <kbd>ESC</kbd>: Cancel
+    </p>
   </div>
 
   <!-- Freecam Indicator (Initially Hidden) -->
@@ -479,4 +529,5 @@
 
   <script src="app.js"></script>
 </body>
+
 </html>

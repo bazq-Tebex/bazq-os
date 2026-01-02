@@ -1,5 +1,31 @@
 # *bazq*-os Changelog
 
+## Version 2.3.0 - January 2025 🚀
+
+### 📍 Teleport to Object
+- **Instant Navigation**: Added "Teleport" button (location icon) to Placed Objects list
+- **Smart Highlighting**: Automatically highlights the target object in yellow for 2 seconds
+- **Precision Teleport**: Spawns player slightly above the object for perfect visibility
+
+### 🔄 JSON to YMAP Converter Updates
+- **Smart Flagging**: Auto-assigns flag `1572864` for doors/gates/kapı objects
+- **Static Exceptions**: Intelligent exception handling for `bazq-sur_kapi` (static frame)
+- **GUI Improvements**: Dark theme GUI with input/output file selection
+- **Performance Safety**: Added warnings for high object counts (>500 objects)
+
+### 🛡️ System Stability (Z-Drift Fix)
+- **Strict Coordinate Locking**: Implemented Deep Freeze system for object coordinates
+- **Physics Isolation**: Prevents objects from creeping upwards ("Z-Drift") on server restarts
+- **Deep Copy Logic**: Ensures save data remains pristine regardless of visual physics glitches
+- **Collision Management**: Improved spawning sequence to prevent ground popping
+
+### 🔧 Improvements & Fixes
+- **Debug Cleanup**: Silenced NUI console logs when debug mode is disabled
+- **Performance Warning**: In-game banner alerts when object count exceeds safe limits
+- **Code Optimization**: Refactored `loadObjects` for maximum reliability
+
+---
+
 ## Version 2.2.0 - January 2025 🧪
 
 ### 🏪 TestZone System - Internal Showcase Feature

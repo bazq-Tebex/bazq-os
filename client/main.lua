@@ -27,13 +27,12 @@ local function DebugLog(level, message)
     DebugPrint(level, message)
 end
 
--- Debug-controlled print function
+-- Debug-controlled print function (unified)
 local function DPrint(level, message)
-    if debugConfig and debugConfig.enabled and debugConfig.levels and debugConfig.levels[level] then
-        print("[" .. level .. "] " .. message)
-    end
+    DebugLog(level, message)
 end
 
+-- Load debug configuration from external file (or use defaults)
 -- Load debug configuration from external file (or use defaults)
 local function LoadDebugConfig()
     -- Minimal initial loading - no prints until debugConfig is ready
@@ -42,44 +41,53 @@ local function LoadDebugConfig()
     end)
     
     if success and config then
-        -- Fix: Don't add "return" if config already starts with "return"
-        local loadString = config
-        if not string.match(config, "^%s*return%s") then
-            loadString = "return " .. config
-        end
-        local loadFunc, err = load(loadString)
+        local conf = nil
         
+        -- First try loading as-is (best for files with comments/return)
+        local loadFunc, err = load(config)
         if loadFunc then
-            local result, conf = pcall(loadFunc)
-            
-            if result and conf then
-                debugConfig = conf
-                -- Now we can use debug-controlled prints
-                DPrint("LOADING", "✅ Config loaded successfully!")
-                DPrint("LOADING", "testZone enabled: " .. tostring(conf.testZone and conf.testZone.enabled))
-                DPrint("LOADING", "testZone center: " .. tostring(conf.testZone and conf.testZone.center and "EXISTS" or "NIL"))
-                
-                DebugLog("GENERAL", "Debug config loaded from debug_config.lua")
-                if conf.userManagement then
-                    DebugLog("USER", string.format("Client UserManagement config - AutoPromote: %s", tostring(conf.userManagement.autoPromoteFirstUser)))
-                end
-                if conf.testZone then
-                    DebugLog("GENERAL", "TestZone config loaded on client")
-                end
-                return
-            else
-                DPrint("LOADING", "❌ Config execution failed: " .. tostring(conf))
+            local ok, result = pcall(loadFunc)
+            if ok and result then
+                conf = result
             end
+        end
+        
+        -- If that failed to return data, try prepending return (for raw table files)
+        if not conf then
+            local loadFunc2, err2 = load("return " .. config)
+            if loadFunc2 then
+                local ok, result = pcall(loadFunc2)
+                if ok and result then
+                    conf = result
+                end
+            end
+        end
+        
+        if conf then
+            debugConfig = conf
+            -- Now we can use debug-controlled prints
+            DPrint("LOADING", "✅ Config loaded successfully!")
+            DPrint("LOADING", "testZone enabled: " .. tostring(conf.testZone and conf.testZone.enabled))
+            
+            DebugLog("GENERAL", "Debug config loaded from debug_config.lua")
+            if conf.userManagement then
+                DebugLog("USER", string.format("Client UserManagement config - AutoPromote: %s", tostring(conf.userManagement.autoPromoteFirstUser)))
+            end
+            if conf.testZone then
+                DebugLog("GENERAL", "TestZone config loaded on client")
+            end
+            return
         else
-            DPrint("LOADING", "❌ Load failed: " .. tostring(err))
+            -- If we have an existing config, keep it vs overwriting with defaults
+            if not debugConfig then
+                print("[bazq-os] [ERROR] Failed to parse debug_config.lua - see F8 for details if manual load attempted")
+            end
         end
     end
     
-    -- Fallback config - no debug prints for default load
-    
-    -- Fallback to default config if file not found or invalid
+    -- Fallback config - default to SILENT to prevent console spam
     debugConfig = {
-        enabled = true,
+        enabled = false, -- Default to SILENT if config missing/fails
         levels = {
             PLACEMENT = true,
             DELETION = true,
@@ -100,7 +108,10 @@ local function LoadDebugConfig()
         testZone = { enabled = false },
         userManagement = { autoPromoteFirstUser = false, requireApproval = false }
     }
-    DebugLog("GENERAL", "Using default debug config (debug_config.lua not found)")
+    -- Ensure user knows why it's silent if it wasn't intentional
+    if success and not config then
+        print("[bazq-os] [WARN] debug_config.lua not found - defaulting to SILENT mode.")
+    end
 end
 
 -- Initialize debug config
@@ -524,6 +535,35 @@ function FindNearbyWall(coords, maxDistance)
     return nil, nil
 end
 
+-- Helper function to find ALL nearby wall objects (sorted by distance)
+function FindAllNearbyWalls(coords, maxDistance)
+    maxDistance = maxDistance or 3.0
+    local walls = {}
+    
+    for i, objData in ipairs(spawnedObjects) do
+        if objData.entity and DoesEntityExist(objData.entity) and objData.model then
+            -- Check if it's a wall object (from either wall package)
+            if objData.model:match("bazq%-sur%d+") or objData.model:match("bazq%-wall2_wall%d+") then
+                local wallCoords = GetEntityCoords(objData.entity)
+                local distance = #(coords - wallCoords)
+                if distance <= maxDistance then
+                    table.insert(walls, {
+                        data = objData,
+                        index = i,
+                        distance = distance,
+                        entity = objData.entity
+                    })
+                end
+            end
+        end
+    end
+    
+    -- Sort by distance (closest first)
+    table.sort(walls, function(a, b) return a.distance < b.distance end)
+    
+    return walls
+end
+
 -- Helper function to check if object requires wall attachment
 function RequiresWallAttachment(modelName)
     return modelName:match("bazq%-wall2_walldecal%d+") or modelName == "bazq-wall2_wallfence"
@@ -617,10 +657,22 @@ function UnhighlightObject(index)
     return false
 end
 
+-- Track currently highlighted object for selection
+local highlightedObjectIndex = nil
+local activeWallHighlightEntity = nil -- Track wall highlight for placement snapping
+
 function ClearAllHighlights()
     if highlightedObjectIndex then
         UnhighlightObject(highlightedObjectIndex)
         highlightedObjectIndex = nil
+    end
+    -- Also clear any wall Snap highlights
+    if activeWallHighlightEntity then
+        if DoesEntityExist(activeWallHighlightEntity) then
+            ResetEntityAlpha(activeWallHighlightEntity)
+            SetEntityDrawOutline(activeWallHighlightEntity, false)
+        end
+        activeWallHighlightEntity = nil
     end
 end
 
@@ -687,6 +739,7 @@ end)
 -- Vanilla object callback removed - replaced with manual spawner
 
 RegisterNUICallback('escapePressed', function(data, cb)
+    ClearAllHighlights()
     DebugLog("MENU", "🔍 ESC PRESSED - IsNuiFocused: " .. tostring(IsNuiFocused()) .. " isMenuOpen: " .. tostring(isMenuOpen))
     if IsNuiFocused() then
         DebugLog("MENU", "❌ ESC: Closing menu via ESC key")
@@ -1313,6 +1366,8 @@ function StartPlacingObject(modelName)
     -- Clear any selection highlighting when starting placement
     ClearAllHighlights()
     placing = true; selectedObject = modelName; manualHeightAdjusted = false
+    wallSelectionIndex = 1 -- Reset wall cycling index
+    hasShownWallHelp = false -- Reset help flag
     DebugPlacement("PLACEMENT STARTED - placing set to TRUE for model: " .. modelName)
     local currentRotation = 0.0
     local rotationSnapMode = false -- false = 1° rotation, true = 5° rotation
@@ -1452,18 +1507,72 @@ function StartPlacingObject(modelName)
             
             -- Special handling for wall attachment objects
             if RequiresWallAttachment(selectedObject) then
-                local nearbyWall, wallIndex = FindNearbyWall(GetEntityCoords(objectEntity), 3.0)
-                if nearbyWall then
+                local cH,hC=RaycastFromCamera()
+                -- Use camera raycast hit as the stable reference point for wall sorting
+                local nearbyWalls = FindAllNearbyWalls(cH and hC or GetEntityCoords(objectEntity), 3.0)
+                -- DebugLog("PLACEMENT", "Found " .. #nearbyWalls .. " nearby walls")
+                
+                -- Check for TAB key to cycle through walls
+                if IsDisabledControlJustReleased(0, 37) then -- TAB key
+                    DebugLog("PLACEMENT", "TAB pressed! Cycling walls. Current: " .. wallSelectionIndex .. ", Total: " .. #nearbyWalls)
+                    wallSelectionIndex = wallSelectionIndex + 1
+                    -- Visual feedback for cycling
+                    SendNUIMessage({action = 'objectSpawned', message = "Cycled to next wall"})
+                end
+                
+                if #nearbyWalls > 0 then
+                    -- Wrap index around if it exceeds count
+                    if wallSelectionIndex > #nearbyWalls then wallSelectionIndex = 1 end
+                    
+                    local selectedWall = nearbyWalls[wallSelectionIndex]
+                    local nearbyWallEntity = selectedWall.entity
+                    
+                    -- Highlight the selected wall (Gold/Orange for target)
+                    local nearbyWallEntity = selectedWall.entity
+                    
+                    -- Only update if changed
+                    if activeWallHighlightEntity ~= nearbyWallEntity then
+                        -- Clear previous wall highlight if different
+                        if activeWallHighlightEntity and DoesEntityExist(activeWallHighlightEntity) then
+                            ResetEntityAlpha(activeWallHighlightEntity)
+                            SetEntityDrawOutline(activeWallHighlightEntity, false)
+                        end
+                        
+                        -- Set new highlight
+                        activeWallHighlightEntity = nearbyWallEntity
+                        SetEntityAlpha(activeWallHighlightEntity, 200, false)
+                        SetEntityDrawOutline(activeWallHighlightEntity, true)
+                        SetEntityDrawOutlineColor(255, 165, 0, 255) -- Orange/Gold outline for target
+                    end
+                    
                     -- Snap to wall position and rotation
-                    local wallCoords = GetEntityCoords(nearbyWall.entity)
-                    local wallHeading = GetEntityHeading(nearbyWall.entity)
+                    local wallCoords = GetEntityCoords(nearbyWallEntity)
+                    local wallHeading = GetEntityHeading(nearbyWallEntity)
                     SetEntityCoords(objectEntity, wallCoords.x, wallCoords.y, wallCoords.z)
                     SetEntityHeading(objectEntity, wallHeading)
+                    
                     -- Brighter green when attached to wall
                     SetEntityAlpha(objectEntity, 220, false)
                     SetEntityDrawOutlineColor(104, 255, 91, 255) -- Brighter green outline
+                    
+                    -- Update help text to include TAB
+                    if not hasShownWallHelp then
+                        SendNUIMessage({action = 'editingModeUpdate', message = "LMB: Place | RMB/ESC: Cancel | TAB: Cycle Wall ("..wallSelectionIndex.."/"..#nearbyWalls..") | Q/E: Rotate | Mouse Wheel: Height", editingActive = true})
+                        hasShownWallHelp = true
+                    end
                 else
                     -- No wall nearby, make it red and transparent
+                    wallSelectionIndex = 1 -- Reset index
+                    
+                    -- Clear any stuck wall highlight
+                    if activeWallHighlightEntity then
+                        if DoesEntityExist(activeWallHighlightEntity) then
+                            ResetEntityAlpha(activeWallHighlightEntity)
+                            SetEntityDrawOutline(activeWallHighlightEntity, false)
+                        end
+                        activeWallHighlightEntity = nil
+                    end
+                    
                     SetEntityAlpha(objectEntity, 120, false)
                     SetEntityDrawOutlineColor(255, 91, 91, 255) -- Red outline for invalid placement
                     local cH,hC=RaycastFromCamera()
@@ -1597,6 +1706,7 @@ function CancelPlacing(shouldReopenMenu)
         ResetEntityAlpha(objectEntity)
         SetEntityDrawOutline(objectEntity, false)
         SetEntityRenderScorched(objectEntity, false)
+        ClearAllHighlights() -- Fix: Ensure wall highlights are cleared on cancel
         DeleteEntity(objectEntity)
     end
 
@@ -1656,6 +1766,7 @@ function ConfirmPlacement()
             ResetEntityAlpha(objectEntity)
             SetEntityDrawOutline(objectEntity, false)
             SetEntityRenderScorched(objectEntity, false)
+            ClearAllHighlights() -- Fix: Ensure wall highlights are cleared
         else
             DebugLog("GENERAL", "Warn: No net control.")
             SetEntityDynamic(objectEntity,false)
@@ -1664,6 +1775,7 @@ function ConfirmPlacement()
             ResetEntityAlpha(objectEntity)
             SetEntityDrawOutline(objectEntity, false)
             SetEntityRenderScorched(objectEntity, false)
+            ClearAllHighlights() -- Fix: Ensure wall highlights are cleared
         end
         Citizen.Wait(0)
         
@@ -2660,12 +2772,36 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                 if HasModelLoaded(mH) then ent = CreateObject(mH, objSD.coords.x, objSD.coords.y, objSD.coords.z, 0, 0, 0) end
             end
             if ent ~= 0 and DoesEntityExist(ent) then
-                SetEntityAsMissionEntity(ent,1,1);SetEntityDynamic(ent,0);SetEntityCollision(ent,1,1);SetEntityHeading(ent,objSD.heading or 0.0)
+                SetEntityAsMissionEntity(ent, 1, 1)
+                SetEntityDynamic(ent, 0)
+                
+                -- CRITICAL FIX: Prevent object from popping up due to physics
+                -- 1. Disable all collision/physics first
+                SetEntityCollision(ent, false, false)
+                
+                -- 2. Force coordinates immediately (no clearArea!)
+                SetEntityCoords(ent, objSD.coords.x, objSD.coords.y, objSD.coords.z, false, false, false, false)
+                SetEntityHeading(ent, objSD.heading or 0.0)
+                
+                -- 3. Freeze completely
+                FreezeEntityPosition(ent, true)
+                
+                -- 4. Re-enable collision safely (only after freeze)
+                if objSD.hasCollision ~= false then
+                    SetEntityCollision(ent, true, true)
+                end
+                
+                -- 5. Final coordinate enforcement
+                SetEntityCoords(ent, objSD.coords.x, objSD.coords.y, objSD.coords.z, false, false, false, false)
+                    
+                    -- Deep copy coordinates to ensure NO reference to entity position or mutable source
+                    -- This guarantees strict locking: only updated via explicit edit events
+                    local lockedCoords = vector3(objSD.coords.x, objSD.coords.y, objSD.coords.z)
                     
                     local objectData = {
                         entity=ent,
                         model=objSD.model,
-                        coords=objSD.coords,
+                        coords=lockedCoords,
                         heading=objSD.heading,
                         timestamp=objSD.timestamp or "",
                         playerName=objSD.playerName or "Unknown"
@@ -2688,17 +2824,60 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                                 if GetGameTimer() - startTime > 3000 then break end
                                 Citizen.Wait(50)
                             end
+                            -- Special handling: Lookup offset from config if possible
                             local zCoord = objSD.coords.z
                             if objSD.interiorModel == "bazq-surfence" then zCoord = zCoord + 5 end
-                            local interiorEnt = GetClosestObjectOfType(objSD.coords.x, objSD.coords.y, zCoord, 0.6, interiorHash, false, true, true)
+                            
+                            local spawnCoords = vector3(objSD.coords.x, objSD.coords.y, zCoord)
+                            local spawnHeading = objSD.heading or 0.0
+
+                            -- Try to find object config for offsets
+                            if objectsConfig and objectsConfig.packages then
+                                for _, pkg in pairs(objectsConfig.packages) do
+                                    if pkg.objects then
+                                        for _, objCfg in ipairs(pkg.objects) do
+                                            if objCfg.prop == objSD.model and objCfg.additional_objects then
+                                                for _, addObj in ipairs(objCfg.additional_objects) do
+                                                    if addObj.prop == objSD.interiorModel and addObj.offset then
+                                                        -- Found config with offset! Calculate precise position
+                                                        local offset = addObj.offset
+                                                        local headingOffset = addObj.heading_offset or 0.0
+                                                        
+                                                        local headingRad = math.rad(objSD.heading or 0.0)
+                                                        local forwardX = -math.sin(headingRad)
+                                                        local forwardY = math.cos(headingRad)
+                                                        
+                                                        spawnCoords = vector3(
+                                                            objSD.coords.x + (offset.x * math.cos(headingRad)) + (offset.y * forwardX),
+                                                            objSD.coords.y + (offset.x * math.sin(headingRad)) + (offset.y * forwardY),
+                                                            objSD.coords.z + offset.z
+                                                        )
+                                                        spawnHeading = (objSD.heading or 0.0) + headingOffset
+                                                        DebugLog("LOADING", "Applied offset for " .. objSD.interiorModel .. ": " .. tostring(offset.x) .. "," .. tostring(offset.y) .. "," .. tostring(offset.z))
+                                                        break
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+
+                            DebugLog("LOADING", "Spawning interior " .. objSD.interiorModel .. " at Z=" .. spawnCoords.z .. " (Parent Z=" .. objSD.coords.z .. ")")
+                            
+                            local interiorEnt = GetClosestObjectOfType(spawnCoords.x, spawnCoords.y, spawnCoords.z, 0.6, interiorHash, false, true, true)
                             if interiorEnt == 0 then
-                                interiorEnt = CreateObject(interiorHash, objSD.coords.x, objSD.coords.y, zCoord, 0, 0, 0)
+                                interiorEnt = CreateObject(interiorHash, spawnCoords.x, spawnCoords.y, spawnCoords.z, 0, 0, 0)
                             end
                             if DoesEntityExist(interiorEnt) then
-                                SetEntityHeading(interiorEnt, objSD.heading or 0.0)
+                                SetEntityHeading(interiorEnt, spawnHeading)
                                 SetEntityAsMissionEntity(interiorEnt, 1, 1)
                                 SetEntityDynamic(interiorEnt, 0)
+                                FreezeEntityPosition(interiorEnt, true) -- Fix: Ensure interior is frozen
                                 SetEntityCollision(interiorEnt, 1, 1)
+                                -- Force coords
+                                SetEntityCoords(interiorEnt, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false, true)
+                                
                                 objectData.interiorEntity = interiorEnt
                                 objectData.interiorModel = objSD.interiorModel
 
@@ -3685,4 +3864,61 @@ RegisterCommand('debugf7', function()
     DebugLog("MENU", "11. IsPlayerInTestZone() result: " .. tostring(inZone))
     
     DebugLog("MENU", "========== END F7 DEBUG ==========")
+end, false)
+
+RegisterNUICallback('teleportToObject', function(data, cb)
+    local index = tonumber(data.index)
+    if not index or not spawnedObjects[index] then
+        DebugLog("NUI", "Teleport failed: Invalid index " .. tostring(index))
+        cb('error')
+        return
+    end
+
+    local objData = spawnedObjects[index]
+    local targetEntity = objData.entity
+    local targetCoords = objData.coords
+
+    -- If entity doesn't exist but we have coords, spawn/teleport there
+    if not (targetEntity and DoesEntityExist(targetEntity)) then
+        DebugLog("NUI", "Target entity invalid, teleporting to coords")
+        if targetCoords then
+             SetEntityCoords(PlayerPedId(), targetCoords.x, targetCoords.y, targetCoords.z + 2.0, false, false, false, true)
+             cb('ok')
+        else
+             cb('error')
+        end
+        return
+    end
+
+    -- Teleport to entity
+    local entCoords = GetEntityCoords(targetEntity)
+    SetEntityCoords(PlayerPedId(), entCoords.x, entCoords.y, entCoords.z + 10.0, false, false, false, true)
+    
+    -- Highlight
+    SetEntityDrawOutline(targetEntity, true)
+    SetEntityDrawOutlineColor(255, 255, 0, 255) -- Yellow highlight
+    
+    -- Clear highlight after 8 seconds
+    Citizen.SetTimeout(8000, function()
+        if DoesEntityExist(targetEntity) then
+            SetEntityDrawOutline(targetEntity, false)
+        end
+    end)
+    
+    DebugLog("NUI", "Teleported to object index: " .. index)
+    cb('ok')
+end)
+
+RegisterCommand('testwarning', function()
+    -- Ensure UI is visible for the test
+    SetNuiFocus(true, true)
+    SendNUIMessage({ action = 'show' }) 
+    
+    -- Send the test warning trigger
+    SendNUIMessage({
+        action = 'testPerformanceWarning',
+        count = 1600 -- Arbitrary number above 500
+    })
+    
+    DebugLog("TEST", "Triggered performance warning test")
 end, false)

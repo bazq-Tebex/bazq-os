@@ -26,20 +26,20 @@ return {
     
     -- Individual debug categories - you can turn specific types on/off
     levels = {
-        PLACEMENT = true,     -- Object placement and positioning debug
-        DELETION = true,      -- Object deletion and cleanup debug  
-        LOADING = true,       -- Object loading from server debug
-        MENU = true,          -- Menu state and UI debug (ENABLED for TestZone debugging)
-        USER = true,          -- User management and permissions debug
-        GENERAL = true,       -- General script operations debug
-        EDIT = true,          -- Edit mode and keyboard controls debug
-        FREECAM = true,      -- Freecam toggle debug (can be spammy)
-        SAVE = true,          -- Save operations debug
-        COLLISION = true,     -- Collision and physics debug (very spammy)
-        TIMESTAMP = true,     -- Timestamp handling debug
+        PLACEMENT = false,     -- Object placement and positioning debug
+        DELETION = false,      -- Object deletion and cleanup debug  
+        LOADING = false,       -- Object loading from server debug
+        MENU = false,          -- Menu state and UI debug (ENABLED for TestZone debugging)
+        USER = false,          -- User management and permissions debug
+        GENERAL = false,       -- General script operations debug
+        EDIT = false,          -- Edit mode and keyboard controls debug
+        FREECAM = false,      -- Freecam toggle debug (can be spammy)
+        SAVE = false,          -- Save operations debug
+        COLLISION = false,     -- Collision and physics debug (very spammy)
+        TIMESTAMP = false,     -- Timestamp handling debug
         TESTZONE = false,    -- TestZone distance checks (DISABLED - too spammy)
-        SERVER = true,       -- Server-side operations and startup messages
-        CONFIG = true        -- Configuration loading and parsing messages
+        SERVER = false,       -- Server-side operations and startup messages
+        CONFIG = false        -- Configuration loading and parsing messages
     },
     
     -- Debug message format settings
