@@ -6,7 +6,7 @@ description 'bazq Object Spawner - Professional building system with advanced pl
 author 'bazq'
 version '2.3.0'
 
-lua54 'yes'
+--lua54 'yes'
 
 client_scripts {
     'freecam/utils.lua',
@@ -32,8 +32,8 @@ files {
     'debug_config.lua'
 }
 
-escrow_ignore {
+--[[ escrow_ignore {
     '**.json',
     '**.md',
     'debug_config.lua'
-}
+} ]]
