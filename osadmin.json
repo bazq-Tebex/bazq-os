@@ -1,32 +1,32 @@
 {
+    "admins":[],
+    "_legacy_note":"The 'admins' section is deprecated. Please use 'userManagement.users' instead.",
     "_README":{
     "permissions":{
     "mapper":"Can only use object spawner (cannot manage users)",
     "owner":"Full access - can do everything including manage other owners",
     "admin":"Can manage users and use spawner (cannot modify owners)"
 },
-    "role_hierarchy":"owner > admin > mapper > guest",
-    "instructions":"Add your first owner manually by editing the users array below",
     "identifier_help":"Use 'steam:XXXXXXXXX',
      'fivem:XXXXXX',
      or 'license:XXXXXXXX' format",
-    "description":"bazq-os User Management Configuration"
+    "description":"bazq-os User Management Configuration",
+    "instructions":"Add your first owner manually by editing the users array below",
+    "role_hierarchy":"owner > admin > mapper > guest"
 },
+    "last_updated":"2026-02-19 20:39:18",
     "version":"2.10",
-    "_legacy_note":"The 'admins' section is deprecated. Please use 'userManagement.users' instead.",
     "userManagement":{
     "settings":{
-    "requireApproval":false,
-    "autoPromoteFirstUser":true
+    "autoPromoteFirstUser":true,
+    "requireApproval":false
 },
     "users":[{
-    "displayName":"First User",
-    "role":"owner",
+    "addedBy":"system",
     "identifier":"fivem:530821",
-    "dateAdded":"2026-02-03 14:06:43",
-    "addedBy":"system"
+    "dateAdded":"2026-02-19 20:39:18",
+    "role":"owner",
+    "displayName":"First User"
 }]
-},
-    "last_updated":"2026-02-03 14:06:43",
-    "admins":[]
+}
 }

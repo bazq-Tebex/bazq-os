@@ -4,9 +4,8 @@ game 'gta5'
 name 'bazq-os'
 description 'bazq Object Spawner - Professional building system with advanced placement tools'
 author 'bazq'
-version '2.3.0'
+version '2.3.1'
 
---lua54 'yes'
 
 client_scripts {
     'freecam/utils.lua',
@@ -32,8 +31,10 @@ files {
     'debug_config.lua'
 }
 
---[[ escrow_ignore {
-    '**.json',
-    '**.md',
-    'debug_config.lua'
-} ]]
+escrow_ignore {
+  '**/*.lua',
+  '**/*.json',
+  'debug_config.lua',
+  'objects_config.json',
+  
+}

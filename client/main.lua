@@ -2302,11 +2302,17 @@ function ApplyKeyboardEdit()
                         newCoords.z
                     )
                     SetEntityCoords(objData.interiorEntity, offsetCoords.x, offsetCoords.y, offsetCoords.z, false, false, false, true)
+                elseif objData.interiorModel == "bazq-surfence" then
+                    -- Fix: Removed +5.0 offset for Edit. Matches Load logic.
+                    SetEntityCoords(objData.interiorEntity, newCoords.x, newCoords.y, newCoords.z, false, false, false, false)
+                    SetEntityHeading(objData.interiorEntity, newHeading)
                 else
                     -- For other interior entities (like tower interiors), use same position
-                    SetEntityCoords(objData.interiorEntity, newCoords.x, newCoords.y, newCoords.z, false, false, false, true)
+                    SetEntityCoords(objData.interiorEntity, newCoords.x, newCoords.y, newCoords.z, false, false, false, false)
                 end
-                SetEntityHeading(objData.interiorEntity, newHeading)
+                if objData.interiorModel ~= "bazq-surfence" then -- Already set above
+                    SetEntityHeading(objData.interiorEntity, newHeading)
+                end
             end
             -- print("[OP] Updated interior entity position for " .. editingObjectData.model)
         elseif objData.hasCollision then
@@ -2389,9 +2395,12 @@ function CancelKeyboardEdit(revert)
                             editingObjectData.originalCoords.z
                         )
                         SetEntityCoords(objData.interiorEntity, offsetCoords.x, offsetCoords.y, offsetCoords.z, false, false, false, true)
+                    elseif objData.interiorModel == "bazq-surfence" then
+                        -- Fix: Removed +5.0 offset for Cancel Edit. Matches Load logic.
+                        SetEntityCoords(objData.interiorEntity, editingObjectData.originalCoords.x, editingObjectData.originalCoords.y, editingObjectData.originalCoords.z, false, false, false, false)
                     else
                         -- For other interior entities (like tower interiors), use same position
-                        SetEntityCoords(objData.interiorEntity, editingObjectData.originalCoords.x, editingObjectData.originalCoords.y, editingObjectData.originalCoords.z, false, false, false, true)
+                        SetEntityCoords(objData.interiorEntity, editingObjectData.originalCoords.x, editingObjectData.originalCoords.y, editingObjectData.originalCoords.z, false, false, false, false)
                     end
                     SetEntityHeading(objData.interiorEntity, editingObjectData.originalHeading)
                 end
@@ -2826,7 +2835,8 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                             end
                             -- Special handling: Lookup offset from config if possible
                             local zCoord = objSD.coords.z
-                            if objSD.interiorModel == "bazq-surfence" then zCoord = zCoord + 5 end
+                            -- Fix: Removed hardcoded +5 offset for Load. User wants JSON coords to be exact.
+                            -- if objSD.interiorModel == "bazq-surfence" then zCoord = zCoord + 5 end
                             
                             local spawnCoords = vector3(objSD.coords.x, objSD.coords.y, zCoord)
                             local spawnHeading = objSD.heading or 0.0
@@ -2873,10 +2883,22 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                                 SetEntityHeading(interiorEnt, spawnHeading)
                                 SetEntityAsMissionEntity(interiorEnt, 1, 1)
                                 SetEntityDynamic(interiorEnt, 0)
-                                FreezeEntityPosition(interiorEnt, true) -- Fix: Ensure interior is frozen
-                                SetEntityCollision(interiorEnt, 1, 1)
-                                -- Force coords
-                                SetEntityCoords(interiorEnt, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false, true)
+                                
+                                -- CRITICAL FIX for Interior Objects (Z-Drift):
+                                -- 1. Disable collision first
+                                SetEntityCollision(interiorEnt, false, false)
+                                
+                                -- 2. Force coords (clearArea = false)
+                                SetEntityCoords(interiorEnt, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false, false)
+                                
+                                -- 3. Freeze completely
+                                FreezeEntityPosition(interiorEnt, true)
+                                
+                                -- 4. Re-enable collision safely
+                                SetEntityCollision(interiorEnt, true, true)
+                                
+                                -- 5. Final coordinate enforcement (clearArea = false)
+                                SetEntityCoords(interiorEnt, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false, false)
                                 
                                 objectData.interiorEntity = interiorEnt
                                 objectData.interiorModel = objSD.interiorModel

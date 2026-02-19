@@ -399,6 +399,54 @@ local function SaveOsAdminToFile()
     end
 end
 
+-- Helper to format JSON (Pretty Print)
+local function FormatJson(json_str)
+    if not json_str then return "" end
+    local formatted = ""
+    local indent_level = 0
+    local in_string = false
+    local escape = false
+    
+    for i = 1, #json_str do
+        local char = string.sub(json_str, i, i)
+        
+        if not escape and char == '"' then
+            in_string = not in_string
+        elseif not in_string then
+            if char == '{' or char == '[' then
+                indent_level = indent_level + 1
+                formatted = formatted .. char .. "\n" .. string.rep("  ", indent_level)
+                goto continue
+            elseif char == '}' or char == ']' then
+                indent_level = indent_level - 1
+                formatted = formatted .. "\n" .. string.rep("  ", indent_level) .. char
+                goto continue
+            elseif char == ',' then
+                formatted = formatted .. char .. "\n" .. string.rep("  ", indent_level)
+                goto continue
+            elseif char == ':' then
+                formatted = formatted .. ": "
+                goto continue
+            elseif char == ' ' or char == '\n' or char == '\t' or char == '\r' then
+                -- Ignore existing whitespace outside strings
+                goto continue
+            end
+        end
+        
+        formatted = formatted .. char
+        
+        if char == '\\' then
+            escape = not escape
+        else
+            escape = false
+        end
+        
+        ::continue::
+    end
+    
+    return formatted
+end
+
 -- Save objects to JSON file
 local function SaveObjectsToFile()
     DebugSave("SaveObjectsToFile() called with " .. #savedObjects .. " objects")
@@ -417,6 +465,9 @@ local function SaveObjectsToFile()
     
     local success, encodedObjects = pcall(json.encode, savedObjects)
     if success then
+        -- Apply formatting
+        encodedObjects = FormatJson(encodedObjects)
+        
         DebugSave("JSON encoding successful. Length: " .. string.len(encodedObjects))
         DebugSave("JSON preview (first 200 chars): " .. string.sub(encodedObjects or "", 1, 200))
         

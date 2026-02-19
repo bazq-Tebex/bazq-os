@@ -142,6 +142,38 @@ class JsonToYmapApp:
             
         return qx, qy, qz, qw
 
+    def create_entity_item(self, model, x, y, z, qx, qy, qz, qw):
+        # Determine flags based on model name
+        flags = 32
+        lname = model.lower()
+        if any(keyword in lname for keyword in ['gate', 'door', 'kapi', 'sur_mkapi']):
+            flags = 1572864
+        
+        # Exception: bazq-sur_kapi is a doorframe (static), so revert to 32
+        if 'bazq-sur_kapi' in lname:
+            flags = 32
+
+        return f"""  <Item type="CEntityDef">
+   <archetypeName>{model}</archetypeName>
+   <flags value="{flags}" />
+   <guid value="0" />
+   <position x="{x:.6f}" y="{y:.6f}" z="{z:.6f}" />
+   <rotation x="{qx:.7f}" y="{qy:.7f}" z="{qz:.7f}" w="{qw:.7f}" />
+   <scaleXY value="1" />
+   <scaleZ value="1" />
+   <parentIndex value="-1" />
+   <lodDist value="{DEFAULT_LOD_DIST}" />
+   <childLodDist value="0" />
+   <lodLevel>LODTYPES_DEPTH_ORPHANHD</lodLevel>
+   <numChildren value="0" />
+   <priorityLevel>PRI_REQUIRED</priorityLevel>
+   <extensions />
+   <ambientOcclusionMultiplier value="255" />
+   <artificialAmbientOcclusion value="255" />
+   <tintValue value="0" />
+  </Item>
+"""
+
     def convert(self):
         input_path = self.input_entry.get()
         output_path = self.output_entry.get()
@@ -203,40 +235,20 @@ class JsonToYmapApp:
                 # Calculate Rotation
                 qx, qy, qz, qw = self.euler_to_quaternion(-heading) 
 
-                # Determine flags
-                # Special flag for doors/gates/kapi (1572864)
-                # Default flag (32)
-                flags = 32
-                lname = model.lower()
-                if any(x in lname for x in ['gate', 'door', 'kapi', 'sur_mkapi']):
-                    flags = 1572864
-                
-                # Exception: bazq-sur_kapi is a doorframe (static), so revert to 32
-                if 'bazq-sur_kapi' in lname:
-                    flags = 32
-
-                item_xml = f"""  <Item type="CEntityDef">
-   <archetypeName>{model}</archetypeName>
-   <flags value="{flags}" />
-   <guid value="0" />
-   <position x="{x:.6f}" y="{y:.6f}" z="{z:.6f}" />
-   <rotation x="{qx:.7f}" y="{qy:.7f}" z="{qz:.7f}" w="{qw:.7f}" />
-   <scaleXY value="1" />
-   <scaleZ value="1" />
-   <parentIndex value="-1" />
-   <lodDist value="{DEFAULT_LOD_DIST}" />
-   <childLodDist value="0" />
-   <lodLevel>LODTYPES_DEPTH_ORPHANHD</lodLevel>
-   <numChildren value="0" />
-   <priorityLevel>PRI_REQUIRED</priorityLevel>
-   <extensions />
-   <ambientOcclusionMultiplier value="255" />
-   <artificialAmbientOcclusion value="255" />
-   <tintValue value="0" />
-  </Item>
-"""
+                # MAIN ENTITY
+                item_xml = self.create_entity_item(model, x, y, z, qx, qy, qz, qw)
                 entities_xml += item_xml
                 count += 1
+
+                # INTERIOR MODEL SUPPORT
+                interior_model = obj.get('interiorModel') or obj.get('interior_model')
+                if interior_model:
+                    ix, iy, iz = x, y, z
+                    if interior_model == 'bazq-surfence': iz += 5.0
+                    entities_xml += self.create_entity_item(interior_model, ix, iy, iz, qx, qy, qz, qw)
+                    count += 1
+
+
             except Exception as ex:
                 self.log(f"Skipping error object: {ex}")
                 continue

@@ -1,0 +1,9 @@
+tamamdır. şimdi şey yapıcaz. yeni bi tool
+
+object library altına (klavye simgesinin üstü, yeni bi sayfa aç pen simgesi olsun.
+
+bu özellik şöyle çalışacak, kişi açılan sayfada bir prop package seçecek (bazq-wall 1 2 3) ve seçtikten sonra ayar yapacak : tıklamalı check box işte snap to ground, enable random rotation, align to groung (obje x-y axisinde yer kaç dereceyse ona göre spawnlanıcak işte.
+
+sonra onayladıktan sonra menü açık kalıcak, ve sayfanın alt kısmında info olacak.
+
+karakter ise onaylandıktan sonra free olucak, sol click basıp bir nokta belirleyecek, sonra tekrar sol click ile yeni bir nokta atayacak, sağ click ile yol'u sonlandırabilecek. bir yol oluşturma aracıyapıyoruz. bu yol ise kaç metre işte ona göre aralara prop koyucak, işte bazq-wall1 seçtiyse bazq-wall1 7 metrelik duvarlara sahip, öyle dolduracak oalbildiği gibi. asla overlap istemiyorum, yetmiyorsa boş kalsın orası. yada bazq-wall2 2 metre işte, bazq-wall3 ise 0.35m gibi bir rakam. ama bazq-wall3 özel çünkü o bir odun duvar paketi yani 10 farklı model ve genişlikleri farklı ona özel girerim sonra ben configden.
