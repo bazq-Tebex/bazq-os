@@ -339,8 +339,13 @@
             <div class="add-user-form">
               <div class="input-group">
                 <label for="newUserIdentifier">User Identifier (Steam/License/FiveM):</label>
-                <input type="text" id="newUserIdentifier"
-                  placeholder="steam:1234567890abcdef, license:abc123..., or fivem:myidentifier" maxlength="100">
+                <div style="display: flex; gap: 8px;">
+                  <input type="text" id="newUserIdentifier"
+                    placeholder="steam:1234567890abcdef, license:abc123..., or fivem:myidentifier" maxlength="100" style="flex: 1;">
+                  <button id="getOnlinePlayersBtn" style="padding: 0 15px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; transition: all 0.2s;" title="Select Online Player">
+                    <i class="fas fa-users-viewfinder"></i>
+                  </button>
+                </div>
               </div>
               <div class="input-group">
                 <label for="newUserName">Display Name:</label>
@@ -523,6 +528,22 @@
       <div class="control-item">
         <span class="key-badge">F7</span>
         <span class="control-desc">Ana Menü</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Online Players Dialog -->
+  <div id="onlinePlayersDialog" class="confirm-dialog-overlay" style="display: none;">
+    <div class="confirm-dialog" style="max-width: 500px; width: 90%;">
+      <div class="confirm-dialog-header" style="justify-content: space-between;">
+        <h3>Select Online Player</h3>
+        <button id="closeOnlinePlayersBtn" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:16px;"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="confirm-dialog-content" style="max-height: 300px; overflow-y: auto; padding-right: 5px;">
+        <div id="onlinePlayersList" style="display: flex; flex-direction: column; gap: 8px;">
+          <!-- Players will be listed here -->
+          <div style="text-align:center; color:#94a3b8; padding: 20px;">Loading players...</div>
+        </div>
       </div>
     </div>
   </div>

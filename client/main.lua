@@ -1,262 +1,27 @@
 -- ================================
--- DEBUG SYSTEM CONFIGURATION
+-- SYSTEM INITIALIZATION
 -- ================================
--- Initialize debug config variable
-local debugConfig = nil
 
--- Debug function - only prints when debug is enabled
-local function DebugPrint(level, message)
-    if debugConfig and debugConfig.enabled and debugConfig.levels[level] then
-        local prefix = debugConfig.format.prefix .. "-" .. level
-        if debugConfig.format.use_timestamps then
-            -- Client-side safe timestamp using game timer
-            local gameTime = GetGameTimer()
-            local seconds = math.floor(gameTime / 1000) % 86400  -- 24 hours in seconds
-            local hours = math.floor(seconds / 3600)
-            local minutes = math.floor((seconds % 3600) / 60)
-            local secs = seconds % 60
-            local time = string.format("%02d:%02d:%02d", hours, minutes, secs)
-            prefix = "[" .. time .. "] " .. prefix
-        end
-        print(prefix .. " " .. message)
+-- Core bazq debug wrapper
+local function dbg(msg)
+    if Config.Debug then
+        print(("^4[bazq-%s] ^7%s"):format("os", msg))
     end
 end
 
--- Main debug log function (alias for DebugPrint)
-local function DebugLog(level, message)
-    DebugPrint(level, message)
-end
-
--- Debug-controlled print function (unified)
-local function DPrint(level, message)
-    DebugLog(level, message)
-end
-
--- Load debug configuration from external file (or use defaults)
--- Load debug configuration from external file (or use defaults)
-local function LoadDebugConfig()
-    -- Minimal initial loading - no prints until debugConfig is ready
-    local success, config = pcall(function()
-        return LoadResourceFile(GetCurrentResourceName(), "debug_config.lua")
-    end)
-    
-    if success and config then
-        local conf = nil
-        
-        -- First try loading as-is (best for files with comments/return)
-        local loadFunc, err = load(config)
-        if loadFunc then
-            local ok, result = pcall(loadFunc)
-            if ok and result then
-                conf = result
-            end
-        end
-        
-        -- If that failed to return data, try prepending return (for raw table files)
-        if not conf then
-            local loadFunc2, err2 = load("return " .. config)
-            if loadFunc2 then
-                local ok, result = pcall(loadFunc2)
-                if ok and result then
-                    conf = result
-                end
-            end
-        end
-        
-        if conf then
-            debugConfig = conf
-            -- Now we can use debug-controlled prints
-            DPrint("LOADING", "✅ Config loaded successfully!")
-            DPrint("LOADING", "testZone enabled: " .. tostring(conf.testZone and conf.testZone.enabled))
-            
-            DebugLog("GENERAL", "Debug config loaded from debug_config.lua")
-            if conf.userManagement then
-                DebugLog("USER", string.format("Client UserManagement config - AutoPromote: %s", tostring(conf.userManagement.autoPromoteFirstUser)))
-            end
-            if conf.testZone then
-                DebugLog("GENERAL", "TestZone config loaded on client")
-            end
-            return
-        else
-            -- If we have an existing config, keep it vs overwriting with defaults
-            if not debugConfig then
-                print("[bazq-os] [ERROR] Failed to parse debug_config.lua - see F8 for details if manual load attempted")
-            end
-        end
-    end
-    
-    -- Fallback config - default to SILENT to prevent console spam
-    debugConfig = {
-        enabled = false, -- Default to SILENT if config missing/fails
-        levels = {
-            PLACEMENT = true,
-            DELETION = true,
-            LOADING = true,
-            MENU = true,
-            USER = true,
-            GENERAL = true,
-            EDIT = true,
-            FREECAM = false,
-            SAVE = true,
-            COLLISION = false
-        },
-        format = {
-            use_timestamps = false,
-            use_colors = false,
-            prefix = "[OP-DEBUG]"
-        },
-        testZone = { enabled = false },
-        userManagement = { autoPromoteFirstUser = false, requireApproval = false }
-    }
-    -- Ensure user knows why it's silent if it wasn't intentional
-    if success and not config then
-        print("[bazq-os] [WARN] debug_config.lua not found - defaulting to SILENT mode.")
-    end
-end
-
--- Initialize debug config
-LoadDebugConfig()
-
--- Quick debug functions for different levels
-local function DebugPlacement(msg) DebugPrint("PLACEMENT", msg) end
-local function DebugDeletion(msg) DebugPrint("DELETION", msg) end
-local function DebugLoading(msg) DebugPrint("LOADING", msg) end
-local function DebugMenu(msg) DebugPrint("MENU", msg) end
-local function DebugUser(msg) DebugPrint("USER", msg) end
-local function DebugGeneral(msg) DebugPrint("GENERAL", msg) end
-local function DebugEdit(msg) DebugPrint("EDIT", msg) end
-local function DebugFreecam(msg) DebugPrint("FREECAM", msg) end
-local function DebugSave(msg) DebugPrint("SAVE", msg) end
-local function DebugCollision(msg) DebugPrint("COLLISION", msg) end
-
--- Command to reload debug config without restarting resource
-RegisterCommand('reloaddebug', function()
-    -- Use the working LoadDebugConfig from TestZone section
-    local configFile = LoadResourceFile(GetCurrentResourceName(), "debug_config.lua")
-    if configFile then
-        local chunk, err = load(configFile)
-        if chunk then
-            local success, config = pcall(chunk)
-            if success and config then
-                debugConfig = config
-                DebugLog("CONFIG", "✅ Config reloaded successfully using TestZone method!")
-                DebugLog("CONFIG", "testZone.enabled: " .. tostring(config.testZone and config.testZone.enabled))
-                DebugLog("CONFIG", "testZone.center: " .. tostring(config.testZone and config.testZone.center and "EXISTS" or "NIL"))
-                if config.testZone and config.testZone.center then
-                    DebugLog("CONFIG", "testZone.center: " .. config.testZone.center.x .. ", " .. config.testZone.center.y .. ", " .. config.testZone.center.z)
-                end
-            else
-                DebugLog("CONFIG", "❌ Config execution failed: " .. tostring(config))
-            end
-        else
-            DebugLog("CONFIG", "❌ Load failed: " .. tostring(err))
-        end
-    else
-        DebugLog("CONFIG", "❌ File not found!")
-    end
-    
-    DebugLog("GENERAL", "Debug configuration reloaded!")
-end, false)
-
---[[ TESTZONE DEBUG COMMAND COMMENTED OUT - NOT NEEDED
--- Manual TestZone check command for debugging
-RegisterCommand('testzone', function()
-    DPrint("TESTZONE", "🧪 TESTZONE DEBUG START:")
-    DPrint("TESTZONE", "debugConfig exists: " .. tostring(debugConfig ~= nil))
-    
-    if debugConfig then
-        DPrint("TESTZONE", "debugConfig.testZone exists: " .. tostring(debugConfig.testZone ~= nil))
-        if debugConfig.testZone then
-            DPrint("TESTZONE", "testZone.enabled: " .. tostring(debugConfig.testZone.enabled))
-            DPrint("TESTZONE", "testZone.center exists: " .. tostring(debugConfig.testZone.center ~= nil))
-            DPrint("TESTZONE", "testZone.radius: " .. tostring(debugConfig.testZone.radius))
-            DPrint("TESTZONE", "testZone.forceTestMode: " .. tostring(debugConfig.testZone.forceTestMode))
-            
-            if debugConfig.testZone.center then
-                local playerPed = PlayerPedId()
-                local playerPos = GetEntityCoords(playerPed)
-                local center = debugConfig.testZone.center
-                local radius = debugConfig.testZone.radius
-                
-                local distance = #(vector3(playerPos.x, playerPos.y, playerPos.z) - vector3(center.x, center.y, center.z))
-                
-                DPrint("TESTZONE", "Player pos: " .. playerPos.x .. ", " .. playerPos.y .. ", " .. playerPos.z)
-                DPrint("TESTZONE", "TestZone center: " .. center.x .. ", " .. center.y .. ", " .. center.z)
-                DPrint("TESTZONE", "Distance: " .. distance .. "m (radius: " .. radius .. "m)")
-                DPrint("TESTZONE", "In zone: " .. (distance <= radius and "YES" or "NO"))
-                
-                -- Always show chat message for user feedback
-                TriggerEvent('chat:addMessage', {
-                    color = { 255, 255, 0 },
-                    multiline = true,
-                    args = { "[DEBUG]", string.format("Distance: %.1fm | In zone: %s", distance, distance <= radius and "YES" or "NO") }
-                })
-            else
-                DPrint("TESTZONE", "❌ testZone.center is NIL!")
-                TriggerEvent('chat:addMessage', {
-                    color = { 255, 0, 0 },
-                    multiline = true,
-                    args = { "[ERROR]", "TestZone center is NIL! Config not loaded properly." }
-                })
-            end
-        else
-            DPrint("TESTZONE", "❌ debugConfig.testZone is NIL!")
-        end
-    else
-        DPrint("TESTZONE", "❌ debugConfig is NIL!")
-    end
-end, false)
---]]
-
--- Manual config test command
-RegisterCommand('configtest', function()
-    DPrint("LOADING", "🧪 MANUAL CONFIG TEST:")
-    DPrint("LOADING", "Current resource name: " .. GetCurrentResourceName())
-    
-    local file = LoadResourceFile(GetCurrentResourceName(), "debug_config.lua")
-    DPrint("LOADING", "LoadResourceFile result: " .. tostring(file ~= nil))
-    
-    -- Always show basic result in chat
-    local success = file ~= nil
-    TriggerEvent('chat:addMessage', {
-        color = success and { 0, 255, 0 } or { 255, 0, 0 },
-        multiline = true,
-        args = { "[CONFIG-TEST]", success and "✅ Config file found" or "❌ Config file NOT found" }
-    })
-    
-    if file then
-        DPrint("LOADING", "File length: " .. string.len(file))
-        DPrint("LOADING", "File preview: " .. string.sub(file, 1, 200))
-        
-        -- Try to load it
-        local chunk, err = load(file)
-        DPrint("LOADING", "Load success: " .. tostring(chunk ~= nil))
-        if err then DPrint("LOADING", "Load error: " .. err) end
-        
-        if chunk then
-            local execSuccess, result = pcall(chunk)
-            DPrint("LOADING", "Execution success: " .. tostring(execSuccess))
-            if execSuccess then
-                DPrint("LOADING", "Result type: " .. type(result))
-                if result and result.testZone then
-                    DPrint("LOADING", "testZone found in result!")
-                    DPrint("LOADING", "testZone.enabled: " .. tostring(result.testZone.enabled))
-                    if result.testZone.center then
-                        DPrint("LOADING", "testZone.center: " .. result.testZone.center.x .. ", " .. result.testZone.center.y .. ", " .. result.testZone.center.z)
-                    end
-                    
-                    TriggerEvent('chat:addMessage', {
-                        color = { 0, 255, 0 },
-                        multiline = true,
-                        args = { "[CONFIG-TEST]", "✅ Config loaded and TestZone found!" }
-                    })
-                end
-            else
-                DPrint("LOADING", "Execution error: " .. tostring(result))
-            end
-        end
-    end
-end, false)
+-- Compatibility wrappers for existing code
+local function DebugPlacement(msg) dbg(msg) end
+local function DebugDeletion(msg) dbg(msg) end
+local function DebugLoading(msg) dbg(msg) end
+local function DebugMenu(msg) dbg(msg) end
+local function DebugUser(msg) dbg(msg) end
+local function DebugGeneral(msg) dbg(msg) end
+local function DebugEdit(msg) dbg(msg) end
+local function DebugFreecam(msg) dbg(msg) end
+local function DebugSave(msg) dbg(msg) end
+local function DebugCollision(msg) dbg(msg) end
+local function DPrint(level, msg) dbg(msg) end
+local function DebugLog(level, msg) dbg(msg) end
 
 -- Manual F7 test command will be defined after ToggleMenu function
 
@@ -341,10 +106,29 @@ local highlightedObjectIndex = nil
 -- Store current user settings for placement
 local currentUserSettings = {}
 
--- Clean up highlights on resource stop
+-- Clean up highlights and spawned entities on resource stop
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName then
         ClearAllHighlights()
+        if inFocus then
+            SetNuiFocus(false, false)
+        end
+        
+        -- Prevent ghost entities remaining in the world bridging between restarts 
+        for _, objData in ipairs(spawnedObjects) do
+            if objData.entity and DoesEntityExist(objData.entity) then
+                DeleteEntity(objData.entity)
+            end
+            if objData.interiorEntity then
+                if type(objData.interiorEntity) == "table" then
+                    for _, interiorEnt in ipairs(objData.interiorEntity) do
+                        if DoesEntityExist(interiorEnt) then DeleteEntity(interiorEnt) end
+                    end
+                elseif DoesEntityExist(objData.interiorEntity) then
+                    DeleteEntity(objData.interiorEntity)
+                end
+            end
+        end
     end
 end)
 
@@ -845,7 +629,8 @@ RegisterNUICallback('duplicateObject', function(data, cb)
                         model = objData.model,
                         originalCoords = GetEntityCoords(newEntity), 
                         originalHeading = GetEntityHeading(newEntity),
-                        timestamp = timestamp
+                        timestamp = timestamp,
+                        playerName = playerName
                     }
                     
                     -- Apply green glowing wireframe effect for edit mode
@@ -892,7 +677,7 @@ RegisterNUICallback('editObject', function(data, cb)
             editingObjectData = {
                 entity = objData.entity, originalIndex = index, model = objData.model,
                 originalCoords = GetEntityCoords(objData.entity), originalHeading = GetEntityHeading(objData.entity),
-                timestamp = objData.timestamp
+                timestamp = objData.timestamp, playerName = objData.playerName
             }
             
             -- Apply green glowing wireframe effect immediately when starting edit
@@ -1143,15 +928,10 @@ local function ToggleMenu()
         DebugLog("EDIT", "In editing mode, showing editing message")
         SendNUIMessage({action = 'editingModeUpdate', message = "Keyboard Edit Active. Enter:Save, Esc:Cancel.", editingActive = true})
     elseif not placing and not isMenuLoading then
-        -- Only allow menu opening when freecam is not active and not already loading
-        if not isFreecamActive then
-            -- Direct server admin check - no complex client-side logic
-            DebugLog("MENU", "ToggleMenu called - requesting admin permission")
-            isMenuLoading = true
-            TriggerServerEvent("bazq-objectplace:checkAdminPermission")
-        else
-            DebugLog("MENU", "Cannot open menu - freecam is active")
-        end
+        -- Direct server admin check - no complex client-side logic
+        DebugLog("MENU", "ToggleMenu called - requesting admin permission")
+        isMenuLoading = true
+        TriggerServerEvent("bazq-objectplace:checkAdminPermission")
     else
         DebugLog("MENU", "Cannot open menu - placing:" .. tostring(placing) .. " isMenuLoading:" .. tostring(isMenuLoading))
     end
@@ -2253,12 +2033,31 @@ function ApplyKeyboardEdit()
         SetEntityDrawOutline(ent, false)
         SetEntityRenderScorched(ent, false)
         
+        -- Safe array lookup fallback
+        local targetIndex = editingObjectData.originalIndex
+        local objData = spawnedObjects[targetIndex]
+        
+        if not objData or objData.timestamp ~= editingObjectData.timestamp or objData.playerName ~= editingObjectData.playerName then
+            for i, obj in ipairs(spawnedObjects) do
+                if obj.timestamp == editingObjectData.timestamp and obj.playerName == editingObjectData.playerName and obj.model == editingObjectData.model then
+                    targetIndex = i
+                    objData = obj
+                    break
+                end
+            end
+        end
+
+        if not objData then
+            SendNUIMessage({action = 'showError', message = "Object was displaced or deleted from the server while editing! Data desync."})
+            CancelKeyboardEdit(true)
+            return
+        end
+        
         -- Update main object data
-        spawnedObjects[editingObjectData.originalIndex].coords = newCoords
-        spawnedObjects[editingObjectData.originalIndex].heading = newHeading
+        spawnedObjects[targetIndex].coords = newCoords
+        spawnedObjects[targetIndex].heading = newHeading
         
         -- Update interior entity if it exists
-        local objData = spawnedObjects[editingObjectData.originalIndex]
         if objData.interiorEntity then
             if type(objData.interiorEntity) == "table" then
                 -- Handle dual doors
@@ -2560,12 +2359,35 @@ function DeleteSpawnedObject(index)
 end
 
 function AlignObjectToGround(obj)local p=GetEntityCoords(obj);local _,gZ=GetGroundZFor_3dCoord(p.x,p.y,p.z+2.0,false);if gZ then SetEntityCoords(obj,p.x,p.y,gZ,0,0,0,1)end end
-function RaycastFromCamera()local cC,cR=GetGameplayCamCoord(),GetGameplayCamRot(2);local d=RotationToDirection(cR);local dest=cC+d*25.0;local r=StartShapeTestRay(cC.x,cC.y,cC.z,dest.x,dest.y,dest.z,-1,PlayerPedId(),7);local _,h,hC=GetShapeTestResult(r);return h==1,hC end
-function RaycastFromCameraWithEntity()
-    local cC = GetGameplayCamCoord()
-    local cR = GetGameplayCamRot(2)
+function RaycastFromCamera()
+    local cC, cR
+    if IsFreecamActive() then
+        cC = GetFreecamPosition()
+        cR = GetFreecamRotation()
+    else
+        cC = GetGameplayCamCoord()
+        cR = GetGameplayCamRot(2)
+    end
     local d = RotationToDirection(cR)
-    local dest = cC + d * 25.0
+    local distance = IsFreecamActive() and 2000.0 or 25.0
+    local dest = cC + d * distance
+    local r = StartShapeTestRay(cC.x, cC.y, cC.z, dest.x, dest.y, dest.z, -1, PlayerPedId(), 7)
+    local _, h, hC = GetShapeTestResult(r)
+    return h == 1, hC 
+end
+
+function RaycastFromCameraWithEntity()
+    local cC, cR
+    if IsFreecamActive() then
+        cC = GetFreecamPosition()
+        cR = GetFreecamRotation()
+    else
+        cC = GetGameplayCamCoord()
+        cR = GetGameplayCamRot(2)
+    end
+    local d = RotationToDirection(cR)
+    local distance = IsFreecamActive() and 2000.0 or 25.0
+    local dest = cC + d * distance
     local r = StartShapeTestRay(cC.x, cC.y, cC.z, dest.x, dest.y, dest.z, -1, PlayerPedId(), 7)
     
     -- Wait for raycast to complete
@@ -3290,6 +3112,14 @@ AddEventHandler("bazq-objectplace:userListResponse", function(data)
     })
 end)
 
+RegisterNetEvent("bazq-objectplace:onlinePlayersResponse")
+AddEventHandler("bazq-objectplace:onlinePlayersResponse", function(players)
+    SendNUIMessage({
+        action = 'onlinePlayersResponse',
+        players = players
+    })
+end)
+
 RegisterNetEvent("bazq-objectplace:userActionResponse")
 AddEventHandler("bazq-objectplace:userActionResponse", function(data)
     SendNUIMessage({
@@ -3302,6 +3132,11 @@ end)
 -- User Management NUI Callbacks
 RegisterNUICallback('getUserList', function(data, cb)
     TriggerServerEvent("bazq-objectplace:getUserList")
+    cb({status = 'ok'})
+end)
+
+RegisterNUICallback('getOnlinePlayers', function(data, cb)
+    TriggerServerEvent("bazq-objectplace:getOnlinePlayers")
     cb({status = 'ok'})
 end)
 

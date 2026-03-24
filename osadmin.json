@@ -1,32 +1,32 @@
 {
-    "admins":[],
-    "_legacy_note":"The 'admins' section is deprecated. Please use 'userManagement.users' instead.",
-    "_README":{
-    "permissions":{
-    "mapper":"Can only use object spawner (cannot manage users)",
-    "owner":"Full access - can do everything including manage other owners",
-    "admin":"Can manage users and use spawner (cannot modify owners)"
-},
-    "identifier_help":"Use 'steam:XXXXXXXXX',
-     'fivem:XXXXXX',
-     or 'license:XXXXXXXX' format",
-    "description":"bazq-os User Management Configuration",
-    "instructions":"Add your first owner manually by editing the users array below",
-    "role_hierarchy":"owner > admin > mapper > guest"
-},
-    "last_updated":"2026-02-19 20:39:18",
-    "version":"2.10",
-    "userManagement":{
-    "settings":{
-    "autoPromoteFirstUser":true,
-    "requireApproval":false
-},
-    "users":[{
-    "addedBy":"system",
-    "identifier":"fivem:530821",
-    "dateAdded":"2026-02-19 20:39:18",
-    "role":"owner",
-    "displayName":"First User"
-}]
-}
+    "admins": [],
+    "_README": {
+        "permissions": {
+            "owner": "Full access - can do everything including manage other owners",
+            "admin": "Can manage users and use spawner (cannot modify owners)",
+            "mapper": "Can only use object spawner (cannot manage users)"
+        },
+        "description": "bazq-os User Management Configuration",
+        "role_hierarchy": "owner > admin > mapper > guest",
+        "instructions": "Add your first owner manually by editing the users array below",
+        "identifier_help": "Use 'steam:XXXXXXXXX', 'fivem:XXXXXX', or 'license:XXXXXXXX' format"
+    },
+    "_legacy_note": "The 'admins' section is deprecated. Please use 'userManagement.users' instead.",
+    "last_updated": "2026-03-24 00:17:55",
+    "userManagement": {
+        "users": [
+            {
+                "dateAdded": "2026-03-24 00:17:55",
+                "addedBy": "system",
+                "displayName": "bazq",
+                "identifier": "fivem:530821",
+                "role": "owner"
+            }
+        ],
+        "settings": {
+            "requireApproval": false,
+            "autoPromoteFirstUser": true
+        }
+    },
+    "version": "2.10"
 }

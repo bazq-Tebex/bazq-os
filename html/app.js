@@ -139,8 +139,22 @@ function initializeUserManagement() {
   const clearAllMappersBtn = document.getElementById('clearAllMappersBtn');
   const refreshUserListBtn = document.getElementById('refreshUserListBtn');
 
+  const getOnlinePlayersBtn = document.getElementById('getOnlinePlayersBtn');
+  const closeOnlinePlayersBtn = document.getElementById('closeOnlinePlayersBtn');
+
   if (addUserBtn) {
     addUserBtn.addEventListener('click', handleAddUser);
+  }
+
+  if (getOnlinePlayersBtn) {
+    getOnlinePlayersBtn.addEventListener('click', requestOnlinePlayers);
+  }
+
+  if (closeOnlinePlayersBtn) {
+    closeOnlinePlayersBtn.addEventListener('click', () => {
+      document.getElementById('onlinePlayersDialog').style.display = 'none';
+      document.body.classList.remove('modal-open');
+    });
   }
 
   if (newUserIdentifier) {
@@ -186,8 +200,73 @@ function initializeUserManagement() {
       handleUserActionResponse(event.data);
     } else if (event.data.action === 'showTestZoneUI') {
       handleTestZoneUI(event.data);
+    } else if (event.data.action === 'onlinePlayersResponse') {
+      handleOnlinePlayersResponse(event.data);
     }
   });
+}
+
+function requestOnlinePlayers() {
+  const dialog = document.getElementById('onlinePlayersDialog');
+  const list = document.getElementById('onlinePlayersList');
+  
+  if (dialog && list) {
+    list.innerHTML = '<div style="text-align:center; color:#94a3b8; padding: 20px;">Loading players...</div>';
+    dialog.style.display = 'flex';
+    document.body.classList.add('modal-open');
+    
+    fetch('https://bazq-os/getOnlinePlayers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    }).catch(error => {
+      console.error('Error fetching online players:', error);
+      list.innerHTML = '<div style="text-align:center; color:#ef4444; padding: 20px;">Failed to fetch players.</div>';
+    });
+  }
+}
+
+function handleOnlinePlayersResponse(data) {
+  const list = document.getElementById('onlinePlayersList');
+  if (!list) return;
+
+  if (data.players && data.players.length > 0) {
+    list.innerHTML = '';
+    data.players.sort((a, b) => a.distance - b.distance);
+    
+    data.players.forEach(player => {
+      const distanceText = player.distance >= 0 ? `${Math.round(player.distance)}m away` : 'Unknown distance';
+      const item = document.createElement('div');
+      item.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #1f2937; border-radius: 6px; cursor: pointer; border: 1px solid #374151;';
+      item.onmouseover = () => item.style.borderColor = '#3b82f6';
+      item.onmouseout = () => item.style.borderColor = '#374151';
+      
+      item.innerHTML = `
+        <div style="display: flex; flex-direction: column;">
+          <span style="color: #f1f5f9; font-weight: 500;">${escapeHtml(player.name)} <span style="color: #64748b; font-size: 12px;">(ID: ${player.id})</span></span>
+          <span style="color: #94a3b8; font-size: 12px; font-family: monospace;">${escapeHtml(player.identifier)}</span>
+        </div>
+        <div style="color: #3b82f6; font-size: 12px; font-weight: 500;">
+          ${distanceText}
+        </div>
+      `;
+      
+      item.addEventListener('click', () => {
+        const idInput = document.getElementById('newUserIdentifier');
+        const nameInput = document.getElementById('newUserName');
+        if (idInput) idInput.value = player.identifier;
+        if (nameInput) nameInput.value = player.name;
+        
+        document.getElementById('onlinePlayersDialog').style.display = 'none';
+        document.body.classList.remove('modal-open');
+        addLogEntry(`Selected player ${player.name} (${player.identifier})`, 'info');
+      });
+      
+      list.appendChild(item);
+    });
+  } else {
+    list.innerHTML = '<div style="text-align:center; color:#94a3b8; padding: 20px;">No other players found nearby/online.</div>';
+  }
 }
 
 function handleAddUser() {
@@ -2560,14 +2639,14 @@ window.addEventListener("DOMContentLoaded", () => {
           const numTimestamp = parseInt(timestamp);
           if (!isNaN(numTimestamp)) {
             // If it's a small number, it might be seconds; if large, milliseconds
-            date = new Date(numTimestamp > 1000000000 ? numTimestamp * 1000 : numTimestamp);
+            date = new Date(numTimestamp > 1000000000000 ? numTimestamp : numTimestamp * 1000);
           } else {
             date = new Date(timestamp);
           }
         }
       } else if (typeof timestamp === 'number') {
         // Handle timestamp as number - convert Unix timestamp (seconds) to milliseconds
-        date = new Date(timestamp > 1000000000 ? timestamp * 1000 : timestamp);
+        date = new Date(timestamp > 1000000000000 ? timestamp : timestamp * 1000);
       } else {
         return 'Unknown Date';
       }

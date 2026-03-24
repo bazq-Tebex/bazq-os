@@ -1,142 +1,36 @@
 -- ================================
--- DEBUG SYSTEM CONFIGURATION (SERVER)
+-- SYSTEM INITIALIZATION (SERVER)
 -- ================================
--- Load debug configuration
--- Debug system configuration
-local debugConfig = nil
 
--- Debug function - only prints when debug is enabled (unified)
-local function DebugLog(level, message)
-    if debugConfig and debugConfig.enabled and debugConfig.levels[level] then
-        local prefix = debugConfig.format.prefix .. "-" .. level
-        if debugConfig.format.use_timestamps then
-            local time = os.date("%H:%M:%S")
-            prefix = "[" .. time .. "] " .. prefix
-        end
-        print(prefix .. " " .. message)
+-- Core bazq debug wrapper
+local function dbg(msg)
+    if Config.Debug then
+        print(("^4[bazq-%s] ^7%s"):format("os", msg))
     end
 end
 
--- Alias for backwards compatibility within file
-local function DebugPrint(level, message)
-    DebugLog(level, message)
-end
-
-local function LoadDebugConfig()
-    -- Minimal initial loading
-    local configFile = LoadResourceFile(GetCurrentResourceName(), "debug_config.lua")
-    if configFile then
-        local conf = nil
-        
-        -- Try load as-is
-        local loadFunc, err = load(configFile)
-        if loadFunc then
-            local ok, result = pcall(loadFunc)
-            if ok and result then
-                conf = result
-            end
-        end
-        
-        -- Try existing "return" fallback
-        if not conf then
-            local loadFunc2, err2 = load("return " .. configFile)
-            if loadFunc2 then
-                local ok, result = pcall(loadFunc2)
-                if ok and result then
-                    conf = result
-                end
-            end
-        end
-        
-        if conf then
-            debugConfig = conf
-            DebugLog("CONFIG", "Debug config loaded successfully")
-            if conf.userManagement then
-                DebugLog("USER", "UserManagement config loaded")
-            end
-            return true
-        end
-    end
-    
-    -- Fallback to default SILENT config
-    debugConfig = {
-        enabled = false,
-        levels = {
-            USER = true,
-            SAVE = true,
-            LOADING = true,
-            GENERAL = true,
-            SERVER = true
-        },
-        format = {
-            use_timestamps = false,
-            prefix = "[OP-SERVER-DEBUG]"
-        },
-        userManagement = { autoPromoteFirstUser = false, requireApproval = false }
-    }
-    print("[bazq-os] [WARN] debug_config.lua not found/failed - defaulting to SILENT mode.")
-    return false
-end
-
--- Debug config already loaded above
-
--- Additional debug logs using DebugPrint now that it's available
-if debugConfig and debugConfig.userManagement then
-    DebugPrint("USER", string.format("🧪 CONFIG LOADED - AutoPromote: %s, RequireApproval: %s", 
-        tostring(debugConfig.userManagement.autoPromoteFirstUser),
-        tostring(debugConfig.userManagement.requireApproval)))
-end
-if debugConfig and debugConfig.testZone then
-    DebugPrint("GENERAL", string.format("🏢 TESTZONE CONFIG - Enabled: %s", tostring(debugConfig.testZone.enabled)))
-end
-
--- ================================
--- TEST ZONE CONFIG
--- ================================
--- Load test zone config from debug_config.lua on server side as well
-local testZone = {
-    enabled = false,
-    center = { x = 0.0, y = 0.0, z = 0.0 },
-    radius = 100.0,
-    cleanupOnDisconnect = true
-}
-
-do
-    local success, config = pcall(function()
-        return LoadResourceFile(GetCurrentResourceName(), "debug_config.lua")
-    end)
-    if success and config then
-        local loadFunc = load("return " .. config:gsub("^return ", ""))
-        if loadFunc then
-            local ok, conf = pcall(loadFunc)
-            if ok and conf and conf.testZone then
-                testZone = conf.testZone
-                OPLog("[ObjectPlacer] SERVER: testZone config loaded (enabled=" .. tostring(testZone.enabled) .. ")")
-            end
-        end
-    end
-    -- Convar override: bazq-testzone=true|false
-    local function GetConvarBool(name, default)
-        local dv = default and "true" or "false"
-        local v = GetConvar(name, dv)
-        v = (v or ""):lower()
-        return v == "true" or v == "1" or v == "yes" or v == "on"
-    end
-    local conEnabled = GetConvarBool('bazq-testzone', testZone.enabled)
-    if conEnabled ~= testZone.enabled then
-        testZone.enabled = conEnabled
-        OPLog("[ObjectPlacer] SERVER: testZone enabled overridden by convar bazq-testzone=" .. tostring(conEnabled))
-    end
+-- Compatibility wrappers for existing code
+local function DebugUser(msg) dbg(msg) end
+local function DebugSave(msg) dbg(msg) end
+local function DebugLoading(msg) dbg(msg) end
+local function DebugGeneral(msg) dbg(msg) end
+local function DebugLog(_, msg) dbg(msg) end
+local function DebugPrint(_, msg) dbg(msg) end
+local function OPLog(message)
+    -- Remove old prefix if present
+    local cleanMsg = message:gsub("%[ObjectPlacer%] SERVER[:%s]*", "")
+    cleanMsg = cleanMsg:gsub("%[ObjectPlacer%] ", "")
+    dbg(cleanMsg)
 end
 
 local function IsInTestZone(coords)
-    if not testZone.enabled then return false end
+    if not Config.TestZone.enabled then return false end
     if not coords then return false end
-    local dx = coords.x - (testZone.center.x or 0.0)
-    local dy = coords.y - (testZone.center.y or 0.0)
-    local dz = coords.z - (testZone.center.z or 0.0)
+    local dx = coords.x - (Config.TestZone.center.x or 0.0)
+    local dy = coords.y - (Config.TestZone.center.y or 0.0)
+    local dz = coords.z - (Config.TestZone.center.z or 0.0)
     local distSq = dx*dx + dy*dy + dz*dz
-    return distSq <= (testZone.radius or 0.0)^2
+    return distSq <= (Config.TestZone.radius or 0.0)^2
 end
 
 -- ================================
@@ -153,14 +47,14 @@ AddEventHandler('playerDropped', function(reason)
     local src = source
     local playerName = GetPlayerName(src)
     
-    DebugPrint("GENERAL", string.format("Player %s disconnected (reason: %s)", playerName, reason))
+    dbg(string.format("Player %s disconnected (reason: %s)", playerName, reason))
     
     -- TestZone auto-cleanup
-    if testZone.enabled and testZone.cleanupOnDisconnect and playerPlacedObjects[src] then
+    if Config.TestZone.enabled and Config.TestZone.cleanupOnDisconnect and playerPlacedObjects[src] then
         local objectsToDelete = playerPlacedObjects[src]
         local deletedCount = 0
         
-        DebugPrint("GENERAL", string.format("🧹 TestZone cleanup: Removing %d objects from %s", #objectsToDelete, playerName))
+        dbg(string.format("🧹 TestZone cleanup: Removing %d objects from %s", #objectsToDelete, playerName))
         
         -- Remove objects from savedObjects
         for i = #savedObjects, 1, -1 do
@@ -180,14 +74,16 @@ AddEventHandler('playerDropped', function(reason)
         -- Save updated objects to file
         if deletedCount > 0 then
             SaveObjectsToFile()
-            DebugPrint("GENERAL", string.format("🧹 TestZone cleanup complete: Deleted %d/%d objects from %s", 
+            dbg(string.format("🧹 TestZone cleanup complete: Deleted %d/%d objects from %s", 
                 deletedCount, #objectsToDelete, playerName))
             
             -- Notify all clients to update their lists
             TriggerClientEvent('bazq-objectplace:objectsUpdated', -1, savedObjects)
         end
-        
-        -- Clear player tracking
+    end
+    
+    -- Clear player tracking unconditionally to prevent memory leaks
+    if playerPlacedObjects[src] then
         playerPlacedObjects[src] = nil
     end
 end)
@@ -196,28 +92,13 @@ end)
 local playerPlacedObjects = {}
 
 local function TrackPlayerObjects(src, objects)
-    if not testZone.enabled or not testZone.cleanupOnDisconnect then return end
+    if not Config.TestZone.enabled or not Config.TestZone.cleanupOnDisconnect then return end
     if type(objects) ~= "table" then return end
     playerPlacedObjects[src] = {}
     for _, obj in ipairs(objects) do
         table.insert(playerPlacedObjects[src], obj)
     end
 end
-
-
-local function DebugUser(msg) DebugPrint("USER", msg) end
-local function DebugSave(msg) DebugPrint("SAVE", msg) end
-local function DebugLoading(msg) DebugPrint("LOADING", msg) end
-local function DebugGeneral(msg) DebugPrint("GENERAL", msg) end
-local function OPLog(message)
-    -- Remove old prefix if present and log as SERVER level
-    local cleanMsg = message:gsub("%[ObjectPlacer%] SERVER[:%s]*", "")
-    cleanMsg = cleanMsg:gsub("%[ObjectPlacer%] ", "")
-    DebugLog("SERVER", cleanMsg)
-end
-
--- Initialize debug config
-LoadDebugConfig()
 
 -- ================================
 -- SCRIPT CONFIGURATION
@@ -268,40 +149,25 @@ local function LoadOsAdminFromFile()
                 OPLog("[ObjectPlacer] SERVER INFO: Migrating old format osadmin.json to new structure")
                 osAdminData = decodedData
                 if not osAdminData.userManagement then
-                    -- Get default values from debug config
-                    local configAutoPromote = false
-                    local configRequireApproval = false
-                    if debugConfig and debugConfig.userManagement then
-                        configAutoPromote = debugConfig.userManagement.autoPromoteFirstUser or false
-                        configRequireApproval = debugConfig.userManagement.requireApproval or false
-                    end
-                    
                     osAdminData.userManagement = {
                         users = {},
                         settings = {
-                            autoPromoteFirstUser = configAutoPromote,
-                            requireApproval = configRequireApproval
+                            autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
+                            requireApproval = Config.UserManagement.requireApproval or false
                         }
                     }
-                    DebugPrint("USER", string.format("UserManagement initialized from config - AutoPromote: %s", tostring(configAutoPromote)))
+                    DebugPrint("USER", string.format("UserManagement initialized from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
                 end
             end
         else
             OPLog("[ObjectPlacer] SERVER ERROR: Failed to decode osadmin.json or it's not a table.")
-            -- Get default values from debug config
-            local configAutoPromote = false
-            local configRequireApproval = false
-            if debugConfig and debugConfig.userManagement then
-                configAutoPromote = debugConfig.userManagement.autoPromoteFirstUser or false
-                configRequireApproval = debugConfig.userManagement.requireApproval or false
-            end
             
             osAdminData = {
                 userManagement = {
                     users = {},
                     settings = {
-                        autoPromoteFirstUser = configAutoPromote,
-                        requireApproval = configRequireApproval
+                        autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
+                        requireApproval = Config.UserManagement.requireApproval or false
                     }
                 },
                 admins = {},
@@ -309,33 +175,17 @@ local function LoadOsAdminFromFile()
                 version = "2.2.0",
                 last_updated = os.date("%Y-%m-%d %H:%M:%S")
             }
-            DebugPrint("USER", string.format("UserManagement created from config - AutoPromote: %s", tostring(configAutoPromote)))
+            DebugPrint("USER", string.format("UserManagement created from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
         end
     else
         OPLog("[ObjectPlacer] SERVER INFO: osadmin.json not found. Creating default structure with example owner.")
-        -- Get default values from debug config
-        local configAutoPromote = false
-        local configRequireApproval = false
-        if debugConfig and debugConfig.userManagement then
-            configAutoPromote = debugConfig.userManagement.autoPromoteFirstUser or false
-            configRequireApproval = debugConfig.userManagement.requireApproval or false
-        end
         
         osAdminData = {
             userManagement = {
-                users = {
-                    -- Example owner entry for manual editing
-                    -- {
-                    --     identifier = "steam:YOUR_STEAM_ID_HERE",
-                    --     displayName = "Your Name",
-                    --     role = "owner",
-                    --     addedBy = "system",
-                    --     dateAdded = os.date("%Y-%m-%d %H:%M:%S")
-                    -- }
-                },
+                users = {},
                 settings = {
-                    autoPromoteFirstUser = configAutoPromote,
-                    requireApproval = configRequireApproval
+                    autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
+                    requireApproval = Config.UserManagement.requireApproval or false
                 }
             },
             admins = {},
@@ -343,59 +193,9 @@ local function LoadOsAdminFromFile()
             version = "2.10",
             last_updated = os.date("%Y-%m-%d %H:%M:%S")
         }
-        DebugPrint("USER", string.format("New osadmin.json created from config - AutoPromote: %s", tostring(configAutoPromote)))
+        DebugPrint("USER", string.format("New osadmin.json created from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
         -- Save the default structure immediately
         SaveOsAdminToFile()
-    end
-end
-
--- Save osadmin data to JSON file (formatted for manual editing)
-local function SaveOsAdminToFile()
-    osAdminData.last_updated = os.date("%Y-%m-%d %H:%M:%S")
-    
-    -- Create a more readable structure for manual editing
-    local readableData = {
-        _README = {
-            description = "bazq-os User Management Configuration",
-            instructions = "Add your first owner manually by editing the users array below",
-            role_hierarchy = "owner > admin > mapper > guest",
-            permissions = {
-                owner = "Full access - can do everything including manage other owners",
-                admin = "Can manage users and use spawner (cannot modify owners)",
-                mapper = "Can only use object spawner (cannot manage users)"
-            },
-            identifier_help = "Use 'steam:XXXXXXXXX', 'fivem:XXXXXX', or 'license:XXXXXXXX' format"
-        },
-        userManagement = {
-            settings = osAdminData.userManagement and osAdminData.userManagement.settings or {
-                autoPromoteFirstUser = true,
-                requireApproval = false
-            },
-            users = osAdminData.userManagement and osAdminData.userManagement.users or {}
-        },
-        version = "2.10",
-        last_updated = osAdminData.last_updated,
-        
-        -- Keep legacy admins for backwards compatibility but mark as deprecated
-        admins = osAdminData.admins or {},
-        _legacy_note = "The 'admins' section is deprecated. Please use 'userManagement.users' instead."
-    }
-    
-    local success, encodedData = pcall(json.encode, readableData)
-    if success then
-        -- Make JSON more readable by adding some formatting
-        encodedData = encodedData:gsub(",", ",\n    ")
-        encodedData = encodedData:gsub("{", "{\n    ")
-        encodedData = encodedData:gsub("}", "\n}")
-        
-        local saveSuccess = SaveResourceFile(GetCurrentResourceName(), "osadmin.json", encodedData, -1)
-        if not saveSuccess then
-            OPLog("[ObjectPlacer] SERVER ERROR: SaveResourceFile failed to write to osadmin.json")
-        else
-            OPLog("[ObjectPlacer] SERVER INFO: Successfully saved user management data")
-        end
-    else
-        print("[ObjectPlacer] SERVER ERROR: Failed to encode osadmin data to JSON. Error: " .. tostring(encodedData))
     end
 end
 
@@ -445,6 +245,54 @@ local function FormatJson(json_str)
     end
     
     return formatted
+end
+
+-- Save osadmin data to JSON file (formatted for manual editing)
+local function SaveOsAdminToFile()
+    osAdminData.last_updated = os.date("%Y-%m-%d %H:%M:%S")
+    
+    -- Create a more readable structure for manual editing
+    local readableData = {
+        _README = {
+            description = "bazq-os User Management Configuration",
+            instructions = "Add your first owner manually by editing the users array below",
+            role_hierarchy = "owner > admin > mapper > guest",
+            permissions = {
+                owner = "Full access - can do everything including manage other owners",
+                admin = "Can manage users and use spawner (cannot modify owners)",
+                mapper = "Can only use object spawner (cannot manage users)"
+            },
+            identifier_help = "Use 'steam:XXXXXXXXX', 'fivem:XXXXXX', or 'license:XXXXXXXX' format"
+        },
+        userManagement = {
+            settings = osAdminData.userManagement and osAdminData.userManagement.settings or {
+                autoPromoteFirstUser = true,
+                requireApproval = false
+            },
+            users = osAdminData.userManagement and osAdminData.userManagement.users or {}
+        },
+        version = "2.10",
+        last_updated = osAdminData.last_updated,
+        
+        -- Keep legacy admins for backwards compatibility but mark as deprecated
+        admins = osAdminData.admins or {},
+        _legacy_note = "The 'admins' section is deprecated. Please use 'userManagement.users' instead."
+    }
+    
+    local success, encodedData = pcall(json.encode, readableData)
+    if success then
+        -- Apply proper JSON formatting
+        encodedData = FormatJson(encodedData)
+        
+        local saveSuccess = SaveResourceFile(GetCurrentResourceName(), "osadmin.json", encodedData, -1)
+        if not saveSuccess then
+            OPLog("[ObjectPlacer] SERVER ERROR: SaveResourceFile failed to write to osadmin.json")
+        else
+            OPLog("[ObjectPlacer] SERVER INFO: Successfully saved user management data")
+        end
+    else
+        print("[ObjectPlacer] SERVER ERROR: Failed to encode osadmin data to JSON. Error: " .. tostring(encodedData))
+    end
 end
 
 -- Save objects to JSON file
@@ -611,10 +459,23 @@ local function GetUserRole(identifier)
         end
     end
     
+    local userCount = 0
+    if type(userManagementData.users) == "table" then
+        for _ in pairs(userManagementData.users) do
+            userCount = userCount + 1
+        end
+    end
+
     -- Auto-promote first user to owner if setting is enabled AND no users exist
-    if osAdminData.userManagement.settings.autoPromoteFirstUser and 
-       #userManagementData.users == 0 then
+    if osAdminData.userManagement.settings.autoPromoteFirstUser and userCount == 0 then
         local playerName = "First User"
+        for _, playerId in ipairs(GetPlayers()) do
+            if GetPlayerPrimaryIdentifier(tonumber(playerId)) == identifier then
+                playerName = GetPlayerName(tonumber(playerId)) or "First User"
+                break
+            end
+        end
+
         local newUser = {
             identifier = identifier,
             displayName = playerName,
@@ -623,6 +484,9 @@ local function GetUserRole(identifier)
             dateAdded = os.date("%Y-%m-%d %H:%M:%S")
         }
         
+        if type(userManagementData.users) ~= "table" then
+            userManagementData.users = {}
+        end
         table.insert(userManagementData.users, newUser)
         osAdminData.userManagement.users = userManagementData.users
         SaveOsAdminToFile()
@@ -758,6 +622,43 @@ AddEventHandler("bazq-objectplace:getUserList", function()
         currentUserRole = role,
         currentUserIdentifier = identifier
     })
+end)
+
+RegisterNetEvent("bazq-objectplace:getOnlinePlayers")
+AddEventHandler("bazq-objectplace:getOnlinePlayers", function()
+    local src = source
+    if not HasPermission(src, "user_management") then
+        return
+    end
+    
+    local playersInfo = {}
+    local srcPed = GetPlayerPed(src)
+    local srcCoords = GetEntityCoords(srcPed)
+    
+    for _, playerIdStr in ipairs(GetPlayers()) do
+        local playerId = tonumber(playerIdStr)
+        if playerId ~= src then
+            local pPed = GetPlayerPed(playerId)
+            local pCoords = GetEntityCoords(pPed)
+            local dist = -1.0
+            if srcCoords and pCoords then
+                -- calculate 3d distance
+                local dx = srcCoords.x - pCoords.x
+                local dy = srcCoords.y - pCoords.y
+                local dz = srcCoords.z - pCoords.z
+                dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+            end
+            
+            table.insert(playersInfo, {
+                id = playerId,
+                name = GetPlayerName(playerId),
+                identifier = GetPlayerPrimaryIdentifier(playerId) or ("unknown:".. playerId),
+                distance = dist
+            })
+        end
+    end
+    
+    TriggerClientEvent("bazq-objectplace:onlinePlayersResponse", src, playersInfo)
 end)
 
 RegisterNetEvent("bazq-objectplace:addUser")
@@ -941,7 +842,7 @@ AddEventHandler("bazq-objectplace:updateUser", function(originalIdentifier, newD
     end
     
     -- Load current users
-    local users = LoadUsersFromFile()
+    local users = userManagementData.users
     if not users then
         TriggerClientEvent("bazq-objectplace:userActionResponse", src, {
             success = false,
@@ -971,7 +872,13 @@ AddEventHandler("bazq-objectplace:updateUser", function(originalIdentifier, newD
     
     -- Check if admin can modify this user's role
     if newRole ~= currentUser.role then
-        if not CanUserModifyRole(adminRole, currentUser.role) or not CanUserModifyRole(adminRole, newRole) then
+        local function CanModify(aRole, tRole)
+            if aRole == "owner" then return true end
+            if aRole == "admin" and tRole == "mapper" then return true end
+            return false
+        end
+
+        if not CanModify(adminRole, currentUser.role) or not CanModify(adminRole, newRole) then
             TriggerClientEvent("bazq-objectplace:userActionResponse", src, {
                 success = false,
                 message = "You cannot modify this user's role or assign the requested role"
@@ -994,14 +901,16 @@ AddEventHandler("bazq-objectplace:updateUser", function(originalIdentifier, newD
     end
     
     -- Update the user
-    users[userIndex] = {
-        identifier = newIdentifier,
-        displayName = newDisplayName,
-        role = newRole
-    }
+    users[userIndex].identifier = newIdentifier
+    users[userIndex].displayName = newDisplayName
+    users[userIndex].role = newRole
+    users[userIndex].lastModified = os.date("%Y-%m-%d %H:%M:%S")
+    users[userIndex].lastModifiedBy = adminIdentifier
     
     -- Save to file
-    local success = SaveUsersToFile(users)
+    osAdminData.userManagement.users = users
+    SaveOsAdminToFile()
+    local success = true
     if success then
         DebugLog("USER", "User updated: " .. originalIdentifier .. " → " .. newDisplayName .. " (" .. newIdentifier .. ", " .. newRole .. ") by " .. GetPlayerName(src))
         

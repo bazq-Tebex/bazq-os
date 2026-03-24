@@ -7,6 +7,11 @@ author 'bazq'
 version '2.3.1'
 
 
+shared_scripts {
+    'shared/config.lua',
+    'shared/locales.lua'
+}
+
 client_scripts {
     'freecam/utils.lua',
     'freecam/config.lua',
@@ -27,14 +32,11 @@ files {
     'html/style.css',
     'html/images/*.png',
     'html/*.ttf',
-    'objects_config.json',
-    'debug_config.lua'
+    'objects_config.json'
 }
 
 escrow_ignore {
   '**/*.lua',
   '**/*.json',
-  'debug_config.lua',
-  'objects_config.json',
-  
+  'objects_config.json'
 }
