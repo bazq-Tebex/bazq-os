@@ -23,6 +23,32 @@ local function DebugCollision(msg) dbg(msg) end
 local function DPrint(level, msg) dbg(msg) end
 local function DebugLog(level, msg) dbg(msg) end
 
+-- Robust entity deletion with network control request
+local function SafeDeleteEntity(entity)
+    if not entity or not DoesEntityExist(entity) then return end
+    
+    -- Request network control for networked entities
+    if NetworkGetEntityIsNetworked(entity) then
+        local timeout = 0
+        NetworkRequestControlOfEntity(entity)
+        while not NetworkHasControlOfEntity(entity) and timeout < 50 do
+            Wait(10)
+            timeout = timeout + 1
+        end
+    end
+    
+    -- Ensure it can be deleted
+    SetEntityAsMissionEntity(entity, true, true)
+    DeleteEntity(entity)
+    
+    -- Final check
+    if DoesEntityExist(entity) then
+        -- Last ditch effort: move it far away to clear it from scene if deletion failed
+        SetEntityCoords(entity, 0.0, 0.0, -100.0, false, false, false, false)
+        DetachEntity(entity, true, true)
+    end
+end
+
 -- Manual F7 test command will be defined after ToggleMenu function
 
 -- ================================
@@ -33,6 +59,11 @@ local placing = false
 local selectedObject = nil
 local objectEntity = nil
 local editingObjectData = nil
+
+-- Global helper for Freecam to check if we are currently building
+function IsPlacementActive()
+    return placing or editingObjectData ~= nil
+end
 local manualHeightAdjusted = false
 local objectsConfig = {}
 local isMenuOpen = false
@@ -105,32 +136,6 @@ local highlightedObjectIndex = nil
 
 -- Store current user settings for placement
 local currentUserSettings = {}
-
--- Clean up highlights and spawned entities on resource stop
-AddEventHandler('onResourceStop', function(resourceName)
-    if GetCurrentResourceName() == resourceName then
-        ClearAllHighlights()
-        if inFocus then
-            SetNuiFocus(false, false)
-        end
-        
-        -- Prevent ghost entities remaining in the world bridging between restarts 
-        for _, objData in ipairs(spawnedObjects) do
-            if objData.entity and DoesEntityExist(objData.entity) then
-                DeleteEntity(objData.entity)
-            end
-            if objData.interiorEntity then
-                if type(objData.interiorEntity) == "table" then
-                    for _, interiorEnt in ipairs(objData.interiorEntity) do
-                        if DoesEntityExist(interiorEnt) then DeleteEntity(interiorEnt) end
-                    end
-                elseif DoesEntityExist(objData.interiorEntity) then
-                    DeleteEntity(objData.interiorEntity)
-                end
-            end
-        end
-    end
-end)
 
 -- Safe load mode flag (set by server on resource start if players are online)
 local SAFE_LOAD_MODE = false
@@ -301,6 +306,39 @@ end
 local objectList = {} -- Will be populated based on user packages
 local spawnedObjects = {}
 
+-- Clean up highlights and spawned entities on resource stop
+AddEventHandler('onResourceStop', function(resourceName)
+    if GetCurrentResourceName() == resourceName then
+        ClearAllHighlights()
+        if inFocus then
+            SetNuiFocus(false, false)
+        end
+        
+        -- Prevent ghost entities remaining in the world bridging between restarts 
+        if spawnedObjects then
+            for _, objData in ipairs(spawnedObjects) do
+                if objData.entity and DoesEntityExist(objData.entity) then
+                    SetEntityAsMissionEntity(objData.entity, true, true)
+                    DeleteEntity(objData.entity)
+                end
+                if objData.interiorEntity then
+                    if type(objData.interiorEntity) == "table" then
+                        for _, interiorEnt in ipairs(objData.interiorEntity) do
+                            if DoesEntityExist(interiorEnt) then 
+                                SetEntityAsMissionEntity(interiorEnt, true, true)
+                                DeleteEntity(interiorEnt) 
+                            end
+                        end
+                    elseif DoesEntityExist(objData.interiorEntity) then
+                        SetEntityAsMissionEntity(objData.interiorEntity, true, true)
+                        DeleteEntity(objData.interiorEntity)
+                    end
+                end
+            end
+        end
+    end
+end)
+
 -- Helper function to find nearby wall objects
 function FindNearbyWall(coords, maxDistance)
     maxDistance = maxDistance or 2.0
@@ -406,7 +444,8 @@ function GetSerializableSpawnedObjects()
                 displayName = objData.displayName or GetObjectDisplayName(objData.model),
                 coords = coords,
                 packageName = pkg,
-                hasDualDoors = objData.hasDualDoors == true
+                hasDualDoors = objData.hasDualDoors == true,
+                interiorModel = objData.interiorModel
             })
         end
     end
@@ -2259,7 +2298,7 @@ function CleanupAssociatedDoors(parentObjData)
         local doorData = spawnedObjects[doorIndex]
         
         if doorData and doorData.entity and DoesEntityExist(doorData.entity) then
-            DeleteEntity(doorData.entity)
+            SafeDeleteEntity(doorData.entity)
             DebugDeletion("Deleted door entity: " .. (doorData.model or "unknown"))
         end
         
@@ -2268,12 +2307,12 @@ function CleanupAssociatedDoors(parentObjData)
             if type(doorData.interiorEntity) == "table" then
                 for i, doorEntity in ipairs(doorData.interiorEntity) do
                     if DoesEntityExist(doorEntity) then
-                        DeleteEntity(doorEntity)
+                        SafeDeleteEntity(doorEntity)
                         DebugDeletion("Deleted door interior entity " .. i)
                     end
                 end
             elseif DoesEntityExist(doorData.interiorEntity) then
-                DeleteEntity(doorData.interiorEntity)
+                SafeDeleteEntity(doorData.interiorEntity)
                 DebugDeletion("Deleted door interior entity")
             end
         end
@@ -2319,7 +2358,7 @@ function DeleteSpawnedObject(index)
         
         -- Delete main entity
         if objData.entity and DoesEntityExist(objData.entity) then
-            DeleteEntity(objData.entity)
+            SafeDeleteEntity(objData.entity)
             DebugDeletion("Deleted main entity for " .. (objData.model or "unknown"))
         end
         
@@ -2331,7 +2370,7 @@ function DeleteSpawnedObject(index)
                 for i, doorEntity in ipairs(objData.interiorEntity) do
                     DebugDeletion("Checking door " .. i .. ", entity: " .. tostring(doorEntity) .. ", exists: " .. tostring(DoesEntityExist(doorEntity)))
                     if DoesEntityExist(doorEntity) then
-                        DeleteEntity(doorEntity)
+                        SafeDeleteEntity(doorEntity)
                         DebugDeletion("Deleted door entity " .. i)
                     else
                         DebugDeletion("WARNING: Door entity " .. i .. " does not exist!")
@@ -2339,7 +2378,7 @@ function DeleteSpawnedObject(index)
                 end
                 DebugLog("DELETION", "Deleted dual door entities for " .. (objData.model or "unknown"))
             elseif DoesEntityExist(objData.interiorEntity) then
-                DeleteEntity(objData.interiorEntity)
+                SafeDeleteEntity(objData.interiorEntity)
                 DebugLog("DELETION", "Deleted interior entity for " .. (objData.model or "unknown"))
             else
                 DebugDeletion("WARNING: Interior entity does not exist for " .. (objData.model or "unknown"))
@@ -2571,8 +2610,18 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
     -- Clear existing objects
     for _, oD in ipairs(spawnedObjects) do 
         if oD.entity and DoesEntityExist(oD.entity) then 
-            DeleteEntity(oD.entity) 
+            SafeDeleteEntity(oD.entity) 
         end 
+        -- Essential Fix: Also delete interior entities (fences, ladders, doors)
+        if oD.interiorEntity then
+            if type(oD.interiorEntity) == "table" then
+                for _, interiorEnt in ipairs(oD.interiorEntity) do
+                    if DoesEntityExist(interiorEnt) then SafeDeleteEntity(interiorEnt) end
+                end
+            elseif DoesEntityExist(oD.interiorEntity) then
+                SafeDeleteEntity(oD.interiorEntity)
+            end
+        end
     end
     spawnedObjects = {}
     
@@ -2657,8 +2706,8 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                             end
                             -- Special handling: Lookup offset from config if possible
                             local zCoord = objSD.coords.z
-                            -- Fix: Removed hardcoded +5 offset for Load. User wants JSON coords to be exact.
-                            -- if objSD.interiorModel == "bazq-surfence" then zCoord = zCoord + 5 end
+                            -- Fix: Re-enabled +5 offset for Load for bazq-surfence specifically as it's hardcoded during placement
+                            if objSD.interiorModel == "bazq-surfence" then zCoord = zCoord + 5.0 end
                             
                             local spawnCoords = vector3(objSD.coords.x, objSD.coords.y, zCoord)
                             local spawnHeading = objSD.heading or 0.0

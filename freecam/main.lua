@@ -103,6 +103,11 @@ local function UpdateCamera()
 		local moveY = GetSmartControlNormal(CONTROLS.MOVE_Y)
 		local moveZ = GetSmartControlNormal(CONTROLS.MOVE_Z)
 
+		-- Disable vertical movement if placing or editing objects (to avoid Q/E conflict)
+		if IsPlacementActive and IsPlacementActive() then
+			moveZ = 0.0
+		end
+
 		-- Calculate new rotation.
 		local rotX = rot.x + (-lookY * SETTINGS.LOOK_SENSITIVITY_X)
 		local rotZ = rot.z + (-lookX * SETTINGS.LOOK_SENSITIVITY_Y)

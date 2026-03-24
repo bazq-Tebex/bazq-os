@@ -421,10 +421,22 @@ local function InitializeDefaultUsers()
     userManagementData.users = osAdminData.userManagement.users or {}
 end
 
--- Get player identifier (prioritize steam, then fivem, fallback to license)
+-- Get player identifier (checks all identifiers against registered users first, then fallbacks to steam/fivem/license)
 local function GetPlayerPrimaryIdentifier(src)
     local identifiers = GetPlayerIdentifiers(src)
     
+    -- First, check if ANY of the player's identifiers match a registered user in osadmin.json
+    if userManagementData and userManagementData.users then
+        for _, identifier in ipairs(identifiers) do
+            for _, user in pairs(userManagementData.users) do
+                if user.identifier == identifier then
+                    return identifier -- Return the exact identifier that is registered
+                end
+            end
+        end
+    end
+    
+    -- Fallbacks for non-registered users (to display in UI or default auto-promotion)
     -- Check for steam identifier first (highest priority)
     for _, identifier in ipairs(identifiers) do
         if string.sub(identifier, 1, 6) == "steam:" then
@@ -446,7 +458,7 @@ local function GetPlayerPrimaryIdentifier(src)
         end
     end
     
-    return nil
+    return identifiers[1] or nil
 end
 
 -- Get user role by identifier
