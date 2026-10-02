@@ -18,6 +18,26 @@ local osAdminFilePath = GetResourcePath(GetCurrentResourceName()) .. "/osadmin.j
 local savedObjects = {} -- In-memory cache of saved objects
 local osAdminData = {} -- In-memory cache of osadmin data
 local playerPlacedObjects = {} -- Track per-player placed objects for optional cleanup
+local objectStateRevision = 0 -- Authoritative monotonic state revision counter
+
+-- Authoritative ID-based object lookup helpers
+local function FindObjectIndexById(id)
+    if type(id) ~= "string" or id == "" then return nil end
+    for i, obj in ipairs(savedObjects) do
+        if type(obj) == "table" and obj.id == id then
+            return i
+        end
+    end
+    return nil
+end
+
+local function GetObjectById(id)
+    local idx = FindObjectIndexById(id)
+    if idx then
+        return savedObjects[idx], idx
+    end
+    return nil, nil
+end
 
 -- Helper to format JSON (Pretty Print)
 local function FormatJson(json_str)
@@ -143,7 +163,7 @@ local function GenerateUniqueObjectId(knownIds)
     return newId
 end
 
--- Save objects to JSON file
+-- Save objects to JSON file (returns success boolean and optional error message)
 local function SaveObjectsToFile()
     DebugSave("SaveObjectsToFile() called with " .. #savedObjects .. " objects")
     
@@ -160,31 +180,26 @@ local function SaveObjectsToFile()
     end
     
     local success, encodedObjects = pcall(json.encode, savedObjects)
-    if success then
-        -- Apply formatting
-        encodedObjects = FormatJson(encodedObjects)
-        
-        DebugSave("JSON encoding successful. Length: " .. string.len(encodedObjects))
-        DebugSave("JSON preview (first 200 chars): " .. string.sub(encodedObjects or "", 1, 200))
-        
-        local saveSuccess = SaveResourceFile(GetCurrentResourceName(), "saved_objects.json", encodedObjects, -1)
-        if not saveSuccess then
-            OPLog("[ObjectPlacer] SERVER ERROR: SaveResourceFile failed to write to saved_objects.json")
-            OPLog("[ObjectPlacer] SERVER ERROR: Resource path: " .. GetResourcePath(GetCurrentResourceName()))
-        else
-            OPLog("[ObjectPlacer] SERVER SUCCESS: Saved " .. #savedObjects .. " objects to saved_objects.json")
-            
-            -- Verify the save by reading it back
-            local verification = LoadResourceFile(GetCurrentResourceName(), "saved_objects.json")
-            if verification then
-                DebugSave("File verification: " .. string.len(verification) .. " characters written")
-            else
-                DebugSave("File verification FAILED - could not read back saved file")
-            end
-        end
-    else
-        OPLog("[ObjectPlacer] SERVER ERROR: Failed to encode objects to JSON. Error: " .. tostring(encodedObjects))
+    if not success then
+        local err = "Failed to encode objects to JSON: " .. tostring(encodedObjects)
+        OPLog("[ObjectPlacer] SERVER ERROR: " .. err)
+        return false, err
     end
+
+    -- Apply formatting
+    encodedObjects = FormatJson(encodedObjects)
+    DebugSave("JSON encoding successful. Length: " .. string.len(encodedObjects))
+    
+    local saveSuccess = SaveResourceFile(GetCurrentResourceName(), "saved_objects.json", encodedObjects, -1)
+    if not saveSuccess then
+        local err = "SaveResourceFile failed to write to saved_objects.json"
+        OPLog("[ObjectPlacer] SERVER ERROR: " .. err)
+        OPLog("[ObjectPlacer] SERVER ERROR: Resource path: " .. GetResourcePath(GetCurrentResourceName()))
+        return false, err
+    end
+
+    OPLog("[ObjectPlacer] SERVER SUCCESS: Saved " .. #savedObjects .. " objects to saved_objects.json")
+    return true
 end
 
 -- Backward-compatible persistent ID migration
@@ -368,6 +383,7 @@ AddEventHandler('playerDropped', function(reason)
         dbg(string.format("🧹 TestZone cleanup: Removing %d objects from %s", #objectsToDelete, playerName))
         
         -- Remove objects from savedObjects by persistent ID (with coordinate fallback)
+        local deletedIds = {}
         for i = #savedObjects, 1, -1 do
             local obj = savedObjects[i]
             for _, playerObj in ipairs(objectsToDelete) do
@@ -382,6 +398,9 @@ AddEventHandler('playerDropped', function(reason)
                 end
                 
                 if matched then
+                    if obj.id then
+                        table.insert(deletedIds, obj.id)
+                    end
                     table.remove(savedObjects, i)
                     deletedCount = deletedCount + 1
                     break
@@ -389,15 +408,22 @@ AddEventHandler('playerDropped', function(reason)
             end
         end
         
-        -- Save updated objects to file
+        -- Save updated objects to file and broadcast delta delete (no global reload!)
         if deletedCount > 0 then
-            SaveObjectsToFile()
-            dbg(string.format("🧹 TestZone cleanup complete: Deleted %d/%d objects from %s", 
-                deletedCount, #objectsToDelete, playerName))
-            
-            -- Notify all clients to update their lists
-            TriggerClientEvent('bazq-objectplace:objectsUpdated', -1, savedObjects)
-            TriggerClientEvent('bazq-objectplace:loadObjects', -1, savedObjects)
+            local saveOk, saveErr = SaveObjectsToFile()
+            if saveOk then
+                objectStateRevision = objectStateRevision + 1
+                dbg(string.format("🧹 TestZone cleanup complete: Deleted %d/%d objects from %s (Revision %d)", 
+                    deletedCount, #objectsToDelete, playerName, objectStateRevision))
+                
+                -- Broadcast delta delete to all clients instead of full reload
+                TriggerClientEvent('bazq-objectplace:objectsBatchDeleted', -1, {
+                    revision = objectStateRevision,
+                    ids = deletedIds
+                })
+            else
+                dbg("TestZone cleanup persistence failed: " .. tostring(saveErr))
+            end
         end
     end
     
@@ -409,13 +435,16 @@ end)
 
 
 
--- When a new player joins, send them the current list of saved objects
+-- When a new player joins, send them the authoritative snapshot of saved objects
 AddEventHandler('playerJoining', function(source)
     -- Small delay to ensure client is ready
     Citizen.SetTimeout(5000, function()
         if GetPlayerName(source) then -- Check if player is still connected
-            TriggerClientEvent("bazq-objectplace:loadObjects", source, savedObjects)
-            OPLog("[ObjectPlacer] SERVER: Sent " .. #savedObjects .. " saved objects to new player: " .. GetPlayerName(source))
+            TriggerClientEvent("bazq-objectplace:loadObjects", source, {
+                revision = objectStateRevision,
+                objects = savedObjects
+            })
+            OPLog("[ObjectPlacer] SERVER: Sent " .. #savedObjects .. " saved objects to new player: " .. GetPlayerName(source) .. " (Revision: " .. objectStateRevision .. ")")
         end
     end)
 end)
@@ -1100,122 +1129,667 @@ AddEventHandler("bazq-objectplace:clearAllMappers", function()
     })
 end)
 
--- Event: Client requests to save objects
+-- ============================================
+-- AUTHORITATIVE SERVER PAYLOAD VALIDATION
+-- ============================================
+
+local function ValidateId(id)
+    return type(id) == "string" and string.len(id) >= 5 and string.len(id) <= 64 and string.match(id, "^[a-zA-Z0-9_%-]+$") ~= nil
+end
+
+local function ValidateModel(model)
+    return type(model) == "string" and string.len(model) >= 1 and string.len(model) <= 64
+end
+
+local function ValidateFiniteNumber(n, minVal, maxVal)
+    if type(n) ~= "number" or n ~= n or n == math.huge or n == -math.huge then
+        return false
+    end
+    if minVal and n < minVal then return false end
+    if maxVal and n > maxVal then return false end
+    return true
+end
+
+local function ValidateCoords(coords)
+    if type(coords) ~= "table" then return false end
+    local x = tonumber(coords.x)
+    local y = tonumber(coords.y)
+    local z = tonumber(coords.z)
+    if not (ValidateFiniteNumber(x, -10000.0, 10000.0) and
+            ValidateFiniteNumber(y, -10000.0, 10000.0) and
+            ValidateFiniteNumber(z, -2000.0, 10000.0)) then
+        return false
+    end
+    return true
+end
+
+local function ValidateHeading(h)
+    return ValidateFiniteNumber(tonumber(h), -3600.0, 3600.0)
+end
+
+local function ValidateRotation(rot)
+    if rot == nil then return true end
+    if type(rot) ~= "table" then return false end
+    local rx = tonumber(rot.x)
+    local ry = tonumber(rot.y)
+    local rz = tonumber(rot.z)
+    return ValidateFiniteNumber(rx, -3600.0, 3600.0) and
+           ValidateFiniteNumber(ry, -3600.0, 3600.0) and
+           ValidateFiniteNumber(rz, -3600.0, 3600.0)
+end
+
+local function ValidateMetadataString(s, maxLen)
+    if s == nil then return true end
+    maxLen = maxLen or 64
+    return type(s) == "string" and string.len(s) <= maxLen
+end
+
+-- ============================================
+-- AUTHORITATIVE GRANULAR MUTATION HANDLERS
+-- ============================================
+
+-- CREATE: placeObject
+RegisterNetEvent("bazq-objectplace:placeObject")
+AddEventHandler("bazq-objectplace:placeObject", function(payload)
+    local src = source
+    local playerName = GetPlayerName(src) or "Unknown"
+    
+    if not (HasPermission(src, "save") or HasPermission(src, "spawn")) then
+        OPLog("[ObjectPlacer] SERVER: placeObject denied to " .. playerName .. " - insufficient permissions")
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "placeObject",
+            reason = "Insufficient permissions to place objects",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    if type(payload) ~= "table" then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "placeObject",
+            reason = "Malformed payload: table expected"
+        })
+        return
+    end
+    
+    if not ValidateModel(payload.model) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "placeObject",
+            reason = "Invalid or empty prop model name",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    if not ValidateCoords(payload.coords) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "placeObject",
+            reason = "Invalid coordinates (out of bounds or NaN/Inf)",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    local headingVal = 0.0
+    if payload.heading ~= nil then
+        if not ValidateHeading(payload.heading) then
+            TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+                action = "placeObject",
+                reason = "Invalid heading value",
+                requestId = payload.requestId
+            })
+            return
+        end
+        headingVal = tonumber(payload.heading)
+    end
+    
+    if payload.rotation ~= nil and not ValidateRotation(payload.rotation) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "placeObject",
+            reason = "Invalid rotation table",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    if not ValidateMetadataString(payload.interiorModel, 64) or
+       not ValidateMetadataString(payload.displayName, 64) or
+       not ValidateMetadataString(payload.name, 64) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "placeObject",
+            reason = "Metadata string exceeds maximum length",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    -- Generate server-authoritative unique ID
+    local knownIds = {}
+    for _, existing in ipairs(savedObjects) do
+        if type(existing) == "table" and type(existing.id) == "string" and existing.id ~= "" then
+            knownIds[existing.id] = true
+        end
+    end
+    local authoritativeId = GenerateUniqueObjectId(knownIds)
+    
+    local rotVal = nil
+    if payload.rotation then
+        rotVal = {
+            x = tonumber(payload.rotation.x) or 0.0,
+            y = tonumber(payload.rotation.y) or 0.0,
+            z = tonumber(payload.rotation.z) or 0.0
+        }
+    end
+    
+    local newRecord = {
+        id = authoritativeId,
+        model = payload.model,
+        coords = {
+            x = tonumber(payload.coords.x),
+            y = tonumber(payload.coords.y),
+            z = tonumber(payload.coords.z)
+        },
+        heading = headingVal,
+        rotation = rotVal,
+        interiorModel = payload.interiorModel,
+        hasDualDoors = payload.hasDualDoors and true or nil,
+        displayName = payload.displayName or payload.name,
+        playerName = playerName,
+        timestamp = os.date("%Y-%m-%d %H:%M:%S")
+    }
+    
+    table.insert(savedObjects, newRecord)
+    
+    local saveOk, saveErr = SaveObjectsToFile()
+    if saveOk then
+        objectStateRevision = objectStateRevision + 1
+        if Config.TestZone.enabled then
+            TrackPlayerObjects(src, { newRecord })
+        end
+        TriggerClientEvent("bazq-objectplace:objectCreated", -1, {
+            revision = objectStateRevision,
+            object = newRecord,
+            requestId = payload.requestId
+        })
+        dbg(string.format("placeObject success: ID=%s, Model=%s by %s (Revision %d)", authoritativeId, newRecord.model, playerName, objectStateRevision))
+    else
+        table.remove(savedObjects, #savedObjects)
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "placeObject",
+            reason = "Persistence error: " .. tostring(saveErr),
+            requestId = payload.requestId
+        })
+    end
+end)
+
+-- UPDATE: updateObject
+RegisterNetEvent("bazq-objectplace:updateObject")
+AddEventHandler("bazq-objectplace:updateObject", function(payload)
+    local src = source
+    local playerName = GetPlayerName(src) or "Unknown"
+    
+    if not (HasPermission(src, "save") or HasPermission(src, "edit")) then
+        OPLog("[ObjectPlacer] SERVER: updateObject denied to " .. playerName .. " - insufficient permissions")
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Insufficient permissions to edit objects",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    if type(payload) ~= "table" or not ValidateId(payload.id) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Invalid or missing object ID",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    if type(payload.changes) ~= "table" then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Missing changes table",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    local existingObj, idx = GetObjectById(payload.id)
+    if not existingObj then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Object not found with ID: " .. tostring(payload.id),
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    local changes = payload.changes
+    
+    -- Validate allowed fields in changes
+    if changes.coords ~= nil and not ValidateCoords(changes.coords) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Invalid coordinates in changes",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    if changes.heading ~= nil and not ValidateHeading(changes.heading) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Invalid heading in changes",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    if changes.rotation ~= nil and not ValidateRotation(changes.rotation) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Invalid rotation in changes",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    if changes.model ~= nil and not ValidateModel(changes.model) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Invalid model name in changes",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    if not ValidateMetadataString(changes.interiorModel, 64) or
+       not ValidateMetadataString(changes.displayName, 64) or
+       not ValidateMetadataString(changes.name, 64) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Metadata string exceeds maximum length in changes",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    -- Preserve previous snapshot for atomic rollback
+    local previousSnapshot = {}
+    for k, v in pairs(existingObj) do
+        previousSnapshot[k] = v
+    end
+    
+    -- Apply allowed field mutations (ID remains strictly immutable!)
+    if changes.coords ~= nil then
+        existingObj.coords = {
+            x = tonumber(changes.coords.x),
+            y = tonumber(changes.coords.y),
+            z = tonumber(changes.coords.z)
+        }
+    end
+    
+    if changes.heading ~= nil then
+        existingObj.heading = tonumber(changes.heading)
+    end
+    
+    if changes.rotation ~= nil then
+        existingObj.rotation = {
+            x = tonumber(changes.rotation.x) or 0.0,
+            y = tonumber(changes.rotation.y) or 0.0,
+            z = tonumber(changes.rotation.z) or 0.0
+        }
+    end
+    
+    if changes.model ~= nil then
+        existingObj.model = changes.model
+    end
+    
+    if changes.interiorModel ~= nil then
+        existingObj.interiorModel = changes.interiorModel
+    end
+    
+    if changes.hasDualDoors ~= nil then
+        existingObj.hasDualDoors = changes.hasDualDoors and true or nil
+    end
+    
+    if changes.displayName ~= nil then
+        existingObj.displayName = changes.displayName
+    elseif changes.name ~= nil then
+        existingObj.displayName = changes.name
+    end
+    
+    -- Ensure ID is identical to previous
+    existingObj.id = previousSnapshot.id
+    
+    local saveOk, saveErr = SaveObjectsToFile()
+    if saveOk then
+        objectStateRevision = objectStateRevision + 1
+        TriggerClientEvent("bazq-objectplace:objectUpdated", -1, {
+            revision = objectStateRevision,
+            object = existingObj,
+            requestId = payload.requestId
+        })
+        dbg(string.format("updateObject success: ID=%s by %s (Revision %d)", existingObj.id, playerName, objectStateRevision))
+    else
+        -- Rollback in-memory state
+        savedObjects[idx] = previousSnapshot
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "updateObject",
+            reason = "Persistence error: " .. tostring(saveErr),
+            requestId = payload.requestId
+        })
+    end
+end)
+
+-- DELETE: deleteObject
+RegisterNetEvent("bazq-objectplace:deleteObject")
+AddEventHandler("bazq-objectplace:deleteObject", function(payload)
+    local src = source
+    local playerName = GetPlayerName(src) or "Unknown"
+    
+    if not (HasPermission(src, "save") or HasPermission(src, "delete")) then
+        OPLog("[ObjectPlacer] SERVER: deleteObject denied to " .. playerName .. " - insufficient permissions")
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "deleteObject",
+            reason = "Insufficient permissions to delete objects",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    local targetId = type(payload) == "table" and payload.id or payload
+    if not ValidateId(targetId) then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "deleteObject",
+            reason = "Invalid object ID",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    local existingObj, idx = GetObjectById(targetId)
+    if not existingObj then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "deleteObject",
+            reason = "Object not found with ID: " .. tostring(targetId),
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    table.remove(savedObjects, idx)
+    
+    local saveOk, saveErr = SaveObjectsToFile()
+    if saveOk then
+        objectStateRevision = objectStateRevision + 1
+        TriggerClientEvent("bazq-objectplace:objectDeleted", -1, {
+            revision = objectStateRevision,
+            id = targetId,
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        dbg(string.format("deleteObject success: ID=%s by %s (Revision %d)", targetId, playerName, objectStateRevision))
+    else
+        -- Rollback in-memory removal
+        table.insert(savedObjects, idx, existingObj)
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "deleteObject",
+            reason = "Persistence error: " .. tostring(saveErr),
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+    end
+end)
+
+-- BATCH CREATE: batchPlaceObjects
+RegisterNetEvent("bazq-objectplace:batchPlaceObjects")
+AddEventHandler("bazq-objectplace:batchPlaceObjects", function(payload)
+    local src = source
+    local playerName = GetPlayerName(src) or "Unknown"
+    
+    if not (HasPermission(src, "save") or HasPermission(src, "spawn")) then
+        OPLog("[ObjectPlacer] SERVER: batchPlaceObjects denied to " .. playerName .. " - insufficient permissions")
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "batchPlaceObjects",
+            reason = "Insufficient permissions for batch placement",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    if type(payload) ~= "table" then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "batchPlaceObjects",
+            reason = "Malformed payload: table expected"
+        })
+        return
+    end
+    
+    local items = payload.objects or payload
+    if type(items) ~= "table" or #items == 0 or #items > 200 then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "batchPlaceObjects",
+            reason = "Batch size must be between 1 and 200 items",
+            requestId = payload.requestId
+        })
+        return
+    end
+    
+    -- Atomic validation: If any item is invalid, reject the entire batch!
+    for i, item in ipairs(items) do
+        if type(item) ~= "table" or not ValidateModel(item.model) or not ValidateCoords(item.coords) then
+            TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+                action = "batchPlaceObjects",
+                reason = string.format("Batch item %d is invalid: atomic rejection", i),
+                requestId = payload.requestId
+            })
+            return
+        end
+        if item.heading ~= nil and not ValidateHeading(item.heading) then
+            TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+                action = "batchPlaceObjects",
+                reason = string.format("Batch item %d has invalid heading: atomic rejection", i),
+                requestId = payload.requestId
+            })
+            return
+        end
+        if item.rotation ~= nil and not ValidateRotation(item.rotation) then
+            TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+                action = "batchPlaceObjects",
+                reason = string.format("Batch item %d has invalid rotation: atomic rejection", i),
+                requestId = payload.requestId
+            })
+            return
+        end
+    end
+    
+    local knownIds = {}
+    for _, existing in ipairs(savedObjects) do
+        if type(existing) == "table" and type(existing.id) == "string" and existing.id ~= "" then
+            knownIds[existing.id] = true
+        end
+    end
+    
+    local startIndex = #savedObjects + 1
+    local createdBatch = {}
+    local timeStr = os.date("%Y-%m-%d %H:%M:%S")
+    
+    for _, item in ipairs(items) do
+        local authoritativeId = GenerateUniqueObjectId(knownIds)
+        knownIds[authoritativeId] = true
+        
+        local rotVal = nil
+        if item.rotation then
+            rotVal = {
+                x = tonumber(item.rotation.x) or 0.0,
+                y = tonumber(item.rotation.y) or 0.0,
+                z = tonumber(item.rotation.z) or 0.0
+            }
+        end
+        
+        local newRecord = {
+            id = authoritativeId,
+            model = item.model,
+            coords = {
+                x = tonumber(item.coords.x),
+                y = tonumber(item.coords.y),
+                z = tonumber(item.coords.z)
+            },
+            heading = tonumber(item.heading) or 0.0,
+            rotation = rotVal,
+            interiorModel = item.interiorModel,
+            hasDualDoors = item.hasDualDoors and true or nil,
+            displayName = item.displayName or item.name,
+            playerName = playerName,
+            timestamp = timeStr
+        }
+        table.insert(savedObjects, newRecord)
+        table.insert(createdBatch, newRecord)
+    end
+    
+    local saveOk, saveErr = SaveObjectsToFile()
+    if saveOk then
+        objectStateRevision = objectStateRevision + 1
+        if Config.TestZone.enabled then
+            TrackPlayerObjects(src, createdBatch)
+        end
+        TriggerClientEvent("bazq-objectplace:objectsBatchCreated", -1, {
+            revision = objectStateRevision,
+            objects = createdBatch,
+            requestId = payload.requestId
+        })
+        dbg(string.format("batchPlaceObjects success: %d objects created by %s (Revision %d)", #createdBatch, playerName, objectStateRevision))
+    else
+        -- Rollback in-memory insertions
+        for i = #savedObjects, startIndex, -1 do
+            table.remove(savedObjects, i)
+        end
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "batchPlaceObjects",
+            reason = "Persistence error: " .. tostring(saveErr),
+            requestId = payload.requestId
+        })
+    end
+end)
+
+-- BATCH DELETE: deleteObjects
+RegisterNetEvent("bazq-objectplace:deleteObjects")
+AddEventHandler("bazq-objectplace:deleteObjects", function(payload)
+    local src = source
+    local playerName = GetPlayerName(src) or "Unknown"
+    
+    if not (HasPermission(src, "save") or HasPermission(src, "delete")) then
+        OPLog("[ObjectPlacer] SERVER: deleteObjects denied to " .. playerName .. " - insufficient permissions")
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "deleteObjects",
+            reason = "Insufficient permissions to delete objects",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    local ids = type(payload) == "table" and (payload.ids or payload) or {}
+    if type(ids) ~= "table" or #ids == 0 or #ids > 500 then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "deleteObjects",
+            reason = "Invalid batch delete list (must be 1-500 IDs)",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    local idSet = {}
+    for _, id in ipairs(ids) do
+        if ValidateId(id) then idSet[id] = true end
+    end
+    
+    local removedItems = {}
+    local deletedIds = {}
+    
+    for i = #savedObjects, 1, -1 do
+        local obj = savedObjects[i]
+        if obj and obj.id and idSet[obj.id] then
+            table.insert(removedItems, { index = i, obj = obj })
+            table.insert(deletedIds, obj.id)
+            table.remove(savedObjects, i)
+        end
+    end
+    
+    if #deletedIds == 0 then
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "deleteObjects",
+            reason = "None of the specified IDs were found",
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        return
+    end
+    
+    local saveOk, saveErr = SaveObjectsToFile()
+    if saveOk then
+        objectStateRevision = objectStateRevision + 1
+        TriggerClientEvent("bazq-objectplace:objectsBatchDeleted", -1, {
+            revision = objectStateRevision,
+            ids = deletedIds,
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+        dbg(string.format("deleteObjects success: %d objects deleted by %s (Revision %d)", #deletedIds, playerName, objectStateRevision))
+    else
+        -- Rollback in-memory removals (re-insert in ascending order)
+        table.sort(removedItems, function(a, b) return a.index < b.index end)
+        for _, item in ipairs(removedItems) do
+            table.insert(savedObjects, item.index, item.obj)
+        end
+        TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+            action = "deleteObjects",
+            reason = "Persistence error: " .. tostring(saveErr),
+            requestId = type(payload) == "table" and payload.requestId or nil
+        })
+    end
+end)
+
+-- DEPRECATED: Legacy full-array saveObjects event
+-- Phase 3 permanently rejects client-authoritative full-array replacement
 RegisterNetEvent("bazq-objectplace:saveObjects")
 AddEventHandler("bazq-objectplace:saveObjects", function(objectsDataFromClient)
     local src = source
     local playerName = GetPlayerName(src) or "UnknownSource"
     
-    -- Check save permission
-    if not HasPermission(src, "save") then
-        OPLog("[ObjectPlacer] SERVER: Save denied to " .. playerName .. " - insufficient permissions")
-        return
-    end
-    
-    DebugSave("SAVE EVENT TRIGGERED by " .. playerName)
-    DebugSave("Type of received data: " .. type(objectsDataFromClient))
-    
-    if type(objectsDataFromClient) == "table" then
-        DebugSave("Received table with " .. #objectsDataFromClient .. " items from " .. playerName)
-        
-        -- For detailed inspection of the first item if it exists
-        if #objectsDataFromClient > 0 and type(objectsDataFromClient[1]) == "table" then
-            local firstItem = objectsDataFromClient[1]
-            DebugSave("First item details:")
-            DebugSave("  - Model: " .. tostring(firstItem.model))
-            DebugSave("  - Coords: " .. tostring(firstItem.coords and string.format("%.2f, %.2f, %.2f", firstItem.coords.x, firstItem.coords.y, firstItem.coords.z)))
-            DebugSave("  - Heading: " .. tostring(firstItem.heading))
-            DebugSave("  - Timestamp: " .. tostring(firstItem.timestamp))
-            DebugSave("  - Player: " .. tostring(firstItem.playerName))
-        end
-
-        -- Validate and assign authoritative IDs to incoming objects
-        local validatedObjects = {}
-        local knownIds = {}
-        local idListForClient = {}
-        local newAssigned = 0
-        
-        -- Register all existing IDs first to avoid collisions
-        for _, existingObj in ipairs(savedObjects) do
-            if type(existingObj) == "table" and type(existingObj.id) == "string" and existingObj.id ~= "" then
-                knownIds[existingObj.id] = true
-            end
-        end
-        
-        local seenInBatch = {}
-        for i, obj in ipairs(objectsDataFromClient) do
-            if type(obj) == "table" and obj.model and obj.coords then
-                local assignedId = nil
-                -- If client sent an existing ID that is not duplicated in this batch
-                if type(obj.id) == "string" and obj.id ~= "" and not seenInBatch[obj.id] then
-                    assignedId = obj.id
-                    seenInBatch[assignedId] = true
-                    knownIds[assignedId] = true
-                else
-                    -- Brand new object (placed, duplicated, etc.) or duplicate ID: generate authoritative server ID
-                    assignedId = GenerateUniqueObjectId(knownIds)
-                    knownIds[assignedId] = true
-                    seenInBatch[assignedId] = true
-                    newAssigned = newAssigned + 1
-                end
-                
-                obj.id = assignedId
-                table.insert(idListForClient, assignedId)
-                table.insert(validatedObjects, obj)
-            end
-        end
-
-        -- Update savedObjects and save to file
-        savedObjects = validatedObjects
-        
-        -- Track for disconnect cleanup in test zone flow (only objects belonging to this player)
-        local mine = {}
-        for _, obj in ipairs(validatedObjects) do
-            if obj.playerName == playerName then
-                table.insert(mine, obj)
-            end
-        end
-        TrackPlayerObjects(src, mine)
-        
-        DebugSave("Updated savedObjects array, now calling SaveObjectsToFile()")
-        SaveObjectsToFile()
-        
-        OPLog(string.format("[ObjectPlacer] SERVER: Successfully processed save request for %d objects (%d new IDs assigned) from %s", 
-            #validatedObjects, newAssigned, playerName))
-            
-        -- Sync authoritative IDs back to the saving client
-        TriggerClientEvent("bazq-objectplace:syncObjectIds", src, idListForClient)
-        
-        -- Broadcast updated list to all other clients for real-time sync
-        for _, player in ipairs(GetPlayers()) do
-            if tonumber(player) ~= src then -- Don't send to the player who just saved
-                TriggerClientEvent("bazq-objectplace:loadObjects", player, savedObjects)
-            end
-        end
-        DebugSave("Broadcasted updated object list to all other clients")
-        
-    else
-        OPLog("[ObjectPlacer] SERVER ERROR: Received invalid object data type (" .. type(objectsDataFromClient) .. ") for saving from " .. playerName)
-    end
+    OPLog(string.format("[ObjectPlacer] SECURITY ALERT: Client '%s' (src %s) attempted to trigger deprecated full-array 'bazq-objectplace:saveObjects'! Call rejected.", playerName, tostring(src)))
+    TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
+        action = "saveObjects",
+        reason = "Client-authoritative full-array saveObjects is permanently deprecated and disabled in Phase 3. Use granular mutation events."
+    })
 end)
 
--- Event: Client requests the list of saved objects
+-- INITIAL / RECOVERY SNAPSHOT: requestObjects & requestFullSnapshot
 RegisterNetEvent("bazq-objectplace:requestObjects")
 AddEventHandler("bazq-objectplace:requestObjects", function()
     local src = source
-    local playerName = GetPlayerName(src)
+    local playerName = GetPlayerName(src) or "Unknown"
     
-    -- Check if user has any permissions (mappers and above can view objects)
     local identifier = GetPlayerPrimaryIdentifier(src)
     local role = GetUserRole(identifier)
     
     DebugLoading("Object request from " .. playerName .. " (Role: " .. role .. ", Identifier: " .. tostring(identifier) .. ")")
-    DebugLoading("Currently have " .. #savedObjects .. " saved objects to send")
+    DebugLoading("Currently have " .. #savedObjects .. " saved objects to send (Revision " .. objectStateRevision .. ")")
     
-    -- ALLOW ALL USERS to load existing objects (viewing doesn't require permissions)
-    -- Only restrict spawning/editing/deleting, not viewing placed objects
-    TriggerClientEvent("bazq-objectplace:loadObjects", src, savedObjects)
+    TriggerClientEvent("bazq-objectplace:loadObjects", src, {
+        revision = objectStateRevision,
+        objects = savedObjects
+    })
     DebugLoading("Sent " .. #savedObjects .. " objects to " .. playerName .. " (Role: " .. role .. ")")
+end)
+
+RegisterNetEvent("bazq-objectplace:requestFullSnapshot")
+AddEventHandler("bazq-objectplace:requestFullSnapshot", function()
+    local src = source
+    local playerName = GetPlayerName(src) or "Unknown"
+    DebugLoading("Full snapshot requested by " .. playerName .. " (src " .. tostring(src) .. ")")
+    TriggerClientEvent("bazq-objectplace:loadObjects", src, {
+        revision = objectStateRevision,
+        objects = savedObjects
+    })
 end)
 
 -- Get user settings by license (legacy system)
@@ -1522,9 +2096,12 @@ AddEventHandler('onResourceStart', function(resourceName)
             TriggerClientEvent("bazq-objectplace:setSafeLoadMode", player, safeLoadMode)
         end
         
-        -- Send to all currently connected clients
+        -- Send authoritative snapshot to all currently connected clients
         for _, player in ipairs(GetPlayers()) do
-            TriggerClientEvent("bazq-objectplace:loadObjects", player, savedObjects)
+            TriggerClientEvent("bazq-objectplace:loadObjects", player, {
+                revision = objectStateRevision,
+                objects = savedObjects
+            })
         end
     end
 end)

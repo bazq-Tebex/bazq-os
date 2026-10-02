@@ -61,6 +61,15 @@ local objectEntity = nil
 local editingObjectData = nil
 local pathDrawing = false
 local spawnedObjects = {}
+local lastAppliedRevision = 0
+local pendingPlacedEntities = {} -- map of requestId -> objectData
+local pendingBatchEntities = {} -- map of requestId -> list of objectData
+
+local function GenerateRequestId(prefix)
+    prefix = prefix or "req"
+    return string.format("%s_%d_%d", prefix, GetGameTimer(), math.random(1000, 9999))
+end
+
 local currentPlacementOptions = {
     snapToGround = true,
     timestamp = "", -- Will be set from JS
@@ -264,7 +273,8 @@ local function StartTargetDuplicate(index)
                 
                 local rot = GetEntityRotation(newEntity, 2)
                 local newIndex = #spawnedObjects + 1
-                spawnedObjects[newIndex] = {
+                local reqId = GenerateRequestId("dup")
+                local newRecord = {
                     id = nil, -- Explicitly nil: duplicated objects MUST receive fresh server-generated IDs
                     entity = newEntity,
                     model = objData.model,
@@ -275,13 +285,23 @@ local function StartTargetDuplicate(index)
                     timestamp = timestamp,
                     originalIndex = newIndex
                 }
+                spawnedObjects[newIndex] = newRecord
+                pendingPlacedEntities[reqId] = newRecord
                 
                 -- Register target for the new entity
                 if typeof(RegisterTargetForEntity) == "function" or _G.RegisterTargetForEntity then
                     RegisterTargetForEntity(newEntity)
                 end
                 
-                SaveObjectsToServer()
+                TriggerServerEvent("bazq-objectplace:placeObject", {
+                    model = objData.model,
+                    coords = { x = newRecord.coords.x, y = newRecord.coords.y, z = newRecord.coords.z },
+                    heading = newRecord.heading,
+                    rotation = newRecord.rotation,
+                    playerName = playerName,
+                    timestamp = timestamp,
+                    requestId = reqId
+                })
                 
                 SendNUIMessage({
                     action = 'updateSpawnedList',
@@ -632,7 +652,19 @@ ConvertToGate = function(entity)
         }
         RegisterTargetForEntity(gateObj)
         
-        SaveObjectsToServer()
+        if originalId then
+            TriggerServerEvent("bazq-objectplace:updateObject", {
+                id = originalId,
+                changes = {
+                    model = targetGateModel,
+                    coords = { x = spawnCoords.x, y = spawnCoords.y, z = spawnCoords.z },
+                    heading = gateHeading,
+                    rotation = { x = rot.x, y = rot.y, z = rot.z },
+                    interiorModel = interiorModelVal,
+                    hasDualDoors = isDualDoors
+                }
+            })
+        end
         SendNUIMessage({action = "updateSpawnedList", data = GetSerializableSpawnedObjects()})
         SendNUIMessage({action = 'log', message = 'Wall successfully converted to Gate!', type = 'success'})
     end
@@ -1156,6 +1188,14 @@ RegisterNUICallback('deleteObjects', function(data, cb)
     -- Sort valid indices in descending order to avoid index shifting problems
     table.sort(validIndices, function(a, b) return a > b end)
 
+    local idsToDelete = {}
+    for _, index in ipairs(validIndices) do
+        local objData = spawnedObjects[index]
+        if objData and objData.id then
+            table.insert(idsToDelete, objData.id)
+        end
+    end
+
     local deletedCount = 0
     for _, index in ipairs(validIndices) do
         local objData = spawnedObjects[index]
@@ -1192,8 +1232,8 @@ RegisterNUICallback('deleteObjects', function(data, cb)
         end
     end
 
-    if deletedCount > 0 then
-        SaveObjectsToServer()
+    if #idsToDelete > 0 then
+        TriggerServerEvent("bazq-objectplace:deleteObjects", { ids = idsToDelete })
         SendNUIMessage({action = "updateSpawnedList", data = GetSerializableSpawnedObjects()})
     end
 
@@ -1234,24 +1274,36 @@ RegisterNUICallback('duplicateObject', function(data, cb)
                     PlaceObjectOnGroundProperly(newEntity)
                     FreezeEntityPosition(newEntity, true)
                     
-                    -- Add to spawned objects list WITHOUT copying source ID
+                    local rot = GetEntityRotation(newEntity, 2)
                     local newIndex = #spawnedObjects + 1
-                    spawnedObjects[newIndex] = {
+                    local reqId = GenerateRequestId("dup")
+                    local newRecord = {
                         id = nil, -- Must be nil so server assigns a fresh authoritative ID
                         entity = newEntity,
                         model = objData.model,
                         coords = GetEntityCoords(newEntity),
                         heading = GetEntityHeading(newEntity),
+                        rotation = {x = rot.x, y = rot.y, z = rot.z},
                         playerName = playerName,
                         timestamp = timestamp,
                         originalIndex = newIndex
                     }
+                    spawnedObjects[newIndex] = newRecord
+                    pendingPlacedEntities[reqId] = newRecord
                     
                     -- Register target for the new entity
                     RegisterTargetForEntity(newEntity)
                     
-                    -- Save to server (align with server handler)
-                    TriggerServerEvent("bazq-objectplace:saveObjects", GetSerializableSpawnedObjects())
+                    -- Send server-authoritative placeObject request
+                    TriggerServerEvent("bazq-objectplace:placeObject", {
+                        model = objData.model,
+                        coords = { x = newRecord.coords.x, y = newRecord.coords.y, z = newRecord.coords.z },
+                        heading = newRecord.heading,
+                        rotation = newRecord.rotation,
+                        playerName = playerName,
+                        timestamp = timestamp,
+                        requestId = reqId
+                    })
                     
                     -- Update UI
                     SendNUIMessage({
@@ -2518,7 +2570,20 @@ function ConfirmPlacement()
         
         table.insert(spawnedObjects, objectData)
         RegisterTargetForEntity(objectData.entity)
-        SaveObjectsToServer();SendNUIMessage({action="updateSpawnedList",data=GetSerializableSpawnedObjects()})
+        local reqId = GenerateRequestId("place")
+        pendingPlacedEntities[reqId] = objectData
+        TriggerServerEvent("bazq-objectplace:placeObject", {
+            model = objectData.model,
+            coords = { x = objectData.coords.x, y = objectData.coords.y, z = objectData.coords.z },
+            heading = objectData.heading,
+            rotation = objectData.rotation,
+            interiorModel = objectData.interiorModel,
+            hasDualDoors = objectData.hasDualDoors,
+            playerName = objectData.playerName,
+            timestamp = objectData.timestamp,
+            requestId = reqId
+        })
+        SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
         
         -- Stop gizmo immediately when placement completes
         if exports['bazq-os'] then
@@ -2796,7 +2861,16 @@ function ApplyKeyboardEdit()
             -- print("[OP] Updated collision position for " .. editingObjectData.model)
         end
         
-        SaveObjectsToServer()
+        if objData and objData.id then
+            TriggerServerEvent("bazq-objectplace:updateObject", {
+                id = objData.id,
+                changes = {
+                    coords = { x = newCoords.x, y = newCoords.y, z = newCoords.z },
+                    heading = newHeading,
+                    rotation = { x = rot.x, y = rot.y, z = rot.z }
+                }
+            })
+        end
         SendNUIMessage({action = "updateSpawnedList", data = GetSerializableSpawnedObjects()})
         SendNUIMessage({action = 'editingModeUpdate', message = "Object position updated.", isError = false, editingActive = false})
         -- print("[OP] Edit saved: " .. editingObjectData.model)
@@ -2929,9 +3003,13 @@ function CleanupAssociatedDoors(parentObjData)
     end
     
     -- Delete found doors
+    local deletedDoorIds = {}
     for _, doorIndex in ipairs(doorsToDelete) do
         DebugDeletion("Deleting associated door at index: " .. doorIndex)
         local doorData = spawnedObjects[doorIndex]
+        if doorData and doorData.id then
+            table.insert(deletedDoorIds, doorData.id)
+        end
         
         if doorData and doorData.entity and DoesEntityExist(doorData.entity) then
             UnregisterTargetForEntity(doorData.entity)
@@ -2969,8 +3047,10 @@ function CleanupAssociatedDoors(parentObjData)
     
     if #doorsToDelete > 0 then
         DebugDeletion("Cleanup complete. Deleted " .. #doorsToDelete .. " associated doors")
-        -- Update server and UI
-        SaveObjectsToServer()
+        -- Update server via granular batch delete
+        if #deletedDoorIds > 0 then
+            TriggerServerEvent("bazq-objectplace:deleteObjects", { ids = deletedDoorIds })
+        end
         SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
     else
         DebugDeletion("No associated doors found to delete")
@@ -3040,7 +3120,9 @@ function DeleteSpawnedObject(identifier, fallbackId)
         
         -- Note: Collision is automatically managed by the game
         table.remove(spawnedObjects,index)
-        SaveObjectsToServer()
+        if objData and objData.id then
+            TriggerServerEvent("bazq-objectplace:deleteObject", { id = objData.id })
+        end
         SendNUIMessage({action="updateSpawnedList",data=GetSerializableSpawnedObjects()})
         DebugDeletion("Deletion complete")
     else
@@ -3193,60 +3275,218 @@ function DrawEditModeGrid(coords, rightVec, fwdVec, upVec)
 end
 
 function SaveObjectsToServer()
-    local toSave={}
-    DebugLog("SAVE", "Preparing to save " .. #spawnedObjects .. " objects.")
-    for i,objData in ipairs(spawnedObjects)do
-        if objData.model and objData.coords and objData.heading~=nil then
-            -- Skip door entities - they should only exist as interior entities, never as standalone objects
-            if objData.model == "bazq-sur_mkapi" then
-                DebugLog("SAVE", "Skipping door entity " .. objData.model .. " - doors should not be saved as standalone objects")
-                goto continue
-            end
-            
-            local rot = objData.rotation
-            if not rot and objData.entity and DoesEntityExist(objData.entity) then
-                local r = GetEntityRotation(objData.entity, 2)
-                rot = { x = r.x, y = r.y, z = r.z }
-            end
-            
-            DebugLog("SAVE", string.format("Item %d: ID=%s, Model=%s, X=%.2f, Y=%.2f, Z=%.2f, H=%.2f, TS=%s, Player=%s",
-                i, tostring(objData.id or "NEW"), objData.model, objData.coords.x, objData.coords.y, objData.coords.z, objData.heading, objData.timestamp or "N/A", objData.playerName or "Unknown"))
-            local saveData = {
-                id=objData.id,
-                model=objData.model,
-                coords=objData.coords,
-                heading=objData.heading,
-                rotation=rot,
-                timestamp=objData.timestamp or "",
-                playerName=objData.playerName or "Unknown"
-            }
-            -- Include interior model info if it exists
-            if objData.interiorModel then
-                saveData.interiorModel = objData.interiorModel
-            end
-            -- Include dual doors flag if it exists
-            if objData.hasDualDoors then
-                saveData.hasDualDoors = objData.hasDualDoors
-            end
-            table.insert(toSave, saveData)
-        else
-            DebugLog("SAVE", "Item " .. i .. " is missing data. Model: " .. tostring(objData.model))
-        end
-        ::continue::
-    end
-    DebugLog("SAVE", "Triggering server event with " .. #toSave .. " objects.")
-    TriggerServerEvent("bazq-objectplace:saveObjects",toSave)
+    -- DEPRECATED in Phase 3: Client-authoritative full-array replacement is permanently disabled.
+    DebugLog("SAVE", "DEPRECATION WARNING: SaveObjectsToServer() was called but is disabled in Phase 3. Mutations must use granular server events.")
 end
 -- Commands removed - only F7 key access for admins
 
+-- Helper to spawn and track a persistent object descriptor
+local function SpawnPersistentObject(objSD)
+    if not objSD or not objSD.model or not objSD.coords or objSD.coords.x == nil then
+        DebugLog("LOADING", "Skipping invalid object data in SpawnPersistentObject")
+        return nil
+    end
+    
+    -- Check if already tracked by persistent ID
+    if objSD.id and objSD.id ~= "" then
+        for _, existing in ipairs(spawnedObjects) do
+            if existing.id == objSD.id then
+                return existing
+            end
+        end
+    end
+    
+    local mH = GetHashKey(objSD.model)
+    local ent = 0
+    if SAFE_LOAD_MODE then
+        local existing = GetClosestObjectOfType(objSD.coords.x, objSD.coords.y, objSD.coords.z, 0.6, mH, false, true, true)
+        if existing ~= 0 and DoesEntityExist(existing) then
+            DebugLog("LOADING", "SafeLoad: Detected existing entity for " .. objSD.model .. ", skipping spawn")
+            ent = existing
+        end
+    end
+    
+    if ent == 0 then
+        RequestModel(mH)
+        local sT = GetGameTimer()
+        while not HasModelLoaded(mH) do
+            if GetGameTimer() - sT > 5000 then
+                DebugLog("LOADING", "Timeout load " .. tostring(objSD.model))
+                break
+            end
+            Citizen.Wait(50)
+        end
+        if HasModelLoaded(mH) then
+            ent = CreateObject(mH, objSD.coords.x, objSD.coords.y, objSD.coords.z, 0, 0, 0)
+        end
+    end
+    
+    if ent ~= 0 and DoesEntityExist(ent) then
+        SetEntityAsMissionEntity(ent, 1, 1)
+        SetEntityDynamic(ent, 0)
+        
+        SetEntityCollision(ent, false, false)
+        SetEntityCoords(ent, objSD.coords.x, objSD.coords.y, objSD.coords.z, false, false, false, false)
+        if objSD.rotation then
+            SetEntityRotation(ent, objSD.rotation.x, objSD.rotation.y, objSD.rotation.z, 2, true)
+        else
+            SetEntityHeading(ent, objSD.heading or 0.0)
+        end
+        FreezeEntityPosition(ent, true)
+        if objSD.hasCollision ~= false then
+            SetEntityCollision(ent, true, true)
+        end
+        SetEntityCoords(ent, objSD.coords.x, objSD.coords.y, objSD.coords.z, false, false, false, false)
+        
+        local lockedCoords = vector3(objSD.coords.x, objSD.coords.y, objSD.coords.z)
+        local objectData = {
+            id = objSD.id,
+            entity = ent,
+            model = objSD.model,
+            coords = lockedCoords,
+            heading = objSD.heading,
+            rotation = objSD.rotation,
+            displayName = objSD.displayName or objSD.name,
+            timestamp = objSD.timestamp or "",
+            playerName = objSD.playerName or "Unknown"
+        }
+        
+        if objSD.interiorModel then
+            if objSD.interiorModel == "bazq-kule_int-col" then
+                RequestCollisionAtCoord(objSD.coords.x, objSD.coords.y, objSD.coords.z)
+                objectData.interiorModel = objSD.interiorModel
+                objectData.hasCollision = true
+            else
+                local interiorHash = GetHashKey(objSD.interiorModel)
+                RequestModel(interiorHash)
+                local startTime = GetGameTimer()
+                while not HasModelLoaded(interiorHash) do
+                    if GetGameTimer() - startTime > 3000 then break end
+                    Citizen.Wait(50)
+                end
+                local zCoord = objSD.coords.z
+                if objSD.interiorModel == "bazq-surfence" then zCoord = zCoord + 5.0 end
+                
+                local spawnCoords = vector3(objSD.coords.x, objSD.coords.y, zCoord)
+                local spawnHeading = objSD.heading or 0.0
+                
+                if objSD.interiorModel == "bazq-wall2_signpole" then
+                    local headingRad = math.rad(spawnHeading)
+                    local forwardX = -math.sin(headingRad)
+                    local forwardY = math.cos(headingRad)
+                    spawnCoords = vector3(
+                        objSD.coords.x + (0.03 * forwardX),
+                        objSD.coords.y + (0.03 * forwardY),
+                        objSD.coords.z
+                    )
+                end
+                
+                local interiorEnt = GetClosestObjectOfType(spawnCoords.x, spawnCoords.y, spawnCoords.z, 0.6, interiorHash, false, true, true)
+                if interiorEnt == 0 then
+                    interiorEnt = CreateObject(interiorHash, spawnCoords.x, spawnCoords.y, spawnCoords.z, 0, 0, 0)
+                end
+                if DoesEntityExist(interiorEnt) then
+                    SetEntityHeading(interiorEnt, spawnHeading)
+                    SetEntityAsMissionEntity(interiorEnt, 1, 1)
+                    SetEntityDynamic(interiorEnt, 0)
+                    SetEntityCollision(interiorEnt, false, false)
+                    SetEntityCoords(interiorEnt, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false, false)
+                    FreezeEntityPosition(interiorEnt, true)
+                    SetEntityCollision(interiorEnt, true, true)
+                    SetEntityCoords(interiorEnt, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false, false)
+                    
+                    objectData.interiorEntity = interiorEnt
+                    objectData.interiorModel = objSD.interiorModel
+                    
+                    if objSD.interiorModel == "bazq-sur_mkapi" then
+                        local doorHash = interiorHash
+                        local headingRad = math.rad(objSD.heading or 0.0)
+                        local forwardX = -math.sin(headingRad)
+                        local forwardY = math.cos(headingRad)
+                        
+                        local door1X = objSD.coords.x + (5.37824 * forwardX)
+                        local door1Y = objSD.coords.y + (5.37824 * forwardY)
+                        local door1Z = objSD.coords.z
+                        local door1 = GetClosestObjectOfType(door1X, door1Y, door1Z, 0.6, doorHash, false, true, true)
+                        if door1 == 0 then
+                            door1 = interiorEnt
+                            SetEntityCoords(door1, door1X, door1Y, door1Z, false, false, false, true)
+                        end
+                        if DoesEntityExist(door1) then
+                            SetEntityHeading(door1, (objSD.heading or 0.0) + 90.0)
+                        end
+                        
+                        local door2X = objSD.coords.x - (5.37824 * forwardX)
+                        local door2Y = objSD.coords.y - (5.37824 * forwardY)
+                        local door2Z = objSD.coords.z
+                        local door2 = GetClosestObjectOfType(door2X, door2Y, door2Z, 0.6, doorHash, false, true, true)
+                        if door2 == 0 then
+                            door2 = CreateObject(interiorHash, door2X, door2Y, door2Z, 0, 0, 0)
+                        end
+                        if DoesEntityExist(door2) then
+                            SetEntityHeading(door2, (objSD.heading or 0.0) - 90.0)
+                            SetEntityAsMissionEntity(door2, 1, 1)
+                            SetEntityDynamic(door2, 1)
+                            SetEntityCollision(door2, 1, 1)
+                        end
+                        
+                        if DoesEntityExist(door1) and DoesEntityExist(door2) then
+                            objectData.interiorEntity = { door1, door2 }
+                            objectData.hasDualDoors = true
+                        end
+                    end
+                end
+            end
+        end
+        
+        if not (objSD.model == "bazq-sur_mkapi" or (objSD.model and string.match(objSD.model, "bazq%-wall2_gate%d+"))) then
+            SetEntityDynamic(ent, false)
+        end
+        
+        table.insert(spawnedObjects, objectData)
+        RegisterTargetForEntity(ent)
+        return objectData
+    else
+        DebugLog("LOADING", "CreateFail " .. tostring(objSD.model))
+        return nil
+    end
+end
+
+-- Revision gap detection and recovery
+local function CheckAndHandleRevisionMismatch(serverRevision)
+    if type(serverRevision) ~= "number" then return false end
+    if lastAppliedRevision == 0 then
+        lastAppliedRevision = serverRevision
+        return false
+    end
+    if serverRevision == lastAppliedRevision + 1 then
+        lastAppliedRevision = serverRevision
+        return false
+    end
+    if serverRevision > lastAppliedRevision + 1 then
+        DebugLog("LOADING", string.format("Revision gap detected! Local: %d, Server: %d. Requesting full resync snapshot.", lastAppliedRevision, serverRevision))
+        TriggerServerEvent("bazq-objectplace:requestFullSnapshot")
+        return true
+    end
+    -- serverRevision <= lastAppliedRevision: already applied or stale, ignore
+    return true
+end
+
+-- Initial snapshot / recovery resync loader
 RegisterNetEvent("bazq-objectplace:loadObjects")
-AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
+AddEventHandler("bazq-objectplace:loadObjects", function(data)
+    local objectsData = data
+    if type(data) == "table" and data.revision and data.objects then
+        lastAppliedRevision = data.revision
+        objectsData = data.objects
+        DebugLoading(string.format("Loaded authoritative snapshot: Revision %d with %d objects", lastAppliedRevision, #objectsData))
+    end
+    
     -- Clear existing objects
     for _, oD in ipairs(spawnedObjects) do 
         if oD.entity and DoesEntityExist(oD.entity) then 
             SafeDeleteEntity(oD.entity) 
         end 
-        -- Essential Fix: Also delete interior entities (fences, ladders, doors)
         if oD.interiorEntity then
             if type(oD.interiorEntity) == "table" then
                 for _, interiorEnt in ipairs(oD.interiorEntity) do
@@ -3266,230 +3506,233 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
     
     DebugLog("LOADING", "Received " .. #objectsData .. " objects from server to load.")
     
-    for i, objSD in ipairs(objectsData) do 
-        if not objSD.model or not objSD.coords or objSD.coords.x == nil then
-            DebugLog("LOADING", "Skipping invalid object data at index " .. i)
-        else
-            local mH = GetHashKey(objSD.model)
-            local ent = 0
-            -- Safe load mode: only if exact same model exists exactly at coordinate, skip spawn
-            if SAFE_LOAD_MODE then
-                local existing = GetClosestObjectOfType(objSD.coords.x, objSD.coords.y, objSD.coords.z, 0.6, mH, false, true, true)
-                if existing ~= 0 and DoesEntityExist(existing) then
-                    DebugLog("LOADING", "SafeLoad: Detected existing entity for " .. objSD.model .. ", skipping spawn")
-                    ent = existing
-                end
-            end
-            if ent == 0 then
-                RequestModel(mH); local sT = GetGameTimer()
-                while not HasModelLoaded(mH) do if GetGameTimer()-sT>5000 then DebugLog("LOADING", "Timeout load "..objSD.model); break end; Citizen.Wait(50) end
-                if HasModelLoaded(mH) then ent = CreateObject(mH, objSD.coords.x, objSD.coords.y, objSD.coords.z, 0, 0, 0) end
-            end
-            if ent ~= 0 and DoesEntityExist(ent) then
-                SetEntityAsMissionEntity(ent, 1, 1)
-                SetEntityDynamic(ent, 0)
-                
-                -- CRITICAL FIX: Prevent object from popping up due to physics
-                -- 1. Disable all collision/physics first
-                SetEntityCollision(ent, false, false)
-                
-                -- 2. Force coordinates immediately (no clearArea!)
-                SetEntityCoords(ent, objSD.coords.x, objSD.coords.y, objSD.coords.z, false, false, false, false)
-                if objSD.rotation then
-                    SetEntityRotation(ent, objSD.rotation.x, objSD.rotation.y, objSD.rotation.z, 2, true)
-                else
-                    SetEntityHeading(ent, objSD.heading or 0.0)
-                end
-                
-                -- 3. Freeze completely
-                FreezeEntityPosition(ent, true)
-                
-                -- 4. Re-enable collision safely (only after freeze)
-                if objSD.hasCollision ~= false then
-                    SetEntityCollision(ent, true, true)
-                end
-                
-                -- 5. Final coordinate enforcement
-                SetEntityCoords(ent, objSD.coords.x, objSD.coords.y, objSD.coords.z, false, false, false, false)
-                    
-                    -- Deep copy coordinates to ensure NO reference to entity position or mutable source
-                    -- This guarantees strict locking: only updated via explicit edit events
-                    local lockedCoords = vector3(objSD.coords.x, objSD.coords.y, objSD.coords.z)
-                    
-                    local objectData = {
-                        id=objSD.id,
-                        entity=ent,
-                        model=objSD.model,
-                        coords=lockedCoords,
-                        heading=objSD.heading,
-                        rotation=objSD.rotation,
-                        timestamp=objSD.timestamp or "",
-                        playerName=objSD.playerName or "Unknown"
-                    }
-                    
-                    -- Handle interior objects (simplified, balanced blocks)
-                    DebugLog("LOADING", "Model=" .. objSD.model .. ", InteriorModel=" .. tostring(objSD.interiorModel) .. ", HasDualDoors=" .. tostring(objSD.hasDualDoors))
-                    if objSD.interiorModel then
-                        if objSD.interiorModel == "bazq-kule_int-col" then
-                            DebugLog("COLLISION", "Loading collision for " .. objSD.model)
-                            RequestCollisionAtCoord(objSD.coords.x, objSD.coords.y, objSD.coords.z)
-                            objectData.interiorModel = objSD.interiorModel
-                            objectData.hasCollision = true
-                            DebugLog("COLLISION", "Collision requested for " .. objSD.model)
-                        else
-                            local interiorHash = GetHashKey(objSD.interiorModel)
-                            RequestModel(interiorHash)
-                            local startTime = GetGameTimer()
-                            while not HasModelLoaded(interiorHash) do
-                                if GetGameTimer() - startTime > 3000 then break end
-                                Citizen.Wait(50)
-                            end
-                            -- Special handling: Lookup offset from config if possible
-                            local zCoord = objSD.coords.z
-                            -- Fix: Re-enabled +5 offset for Load for bazq-surfence specifically as it's hardcoded during placement
-                            if objSD.interiorModel == "bazq-surfence" then zCoord = zCoord + 5.0 end
-                            
-                            local spawnCoords = vector3(objSD.coords.x, objSD.coords.y, zCoord)
-                            local spawnHeading = objSD.heading or 0.0
-
-                            -- Try to find object config for offsets
-                            if objectsConfig and objectsConfig.packages then
-                                for _, pkg in pairs(objectsConfig.packages) do
-                                    if pkg.objects then
-                                        for _, objCfg in ipairs(pkg.objects) do
-                                            if objCfg.prop == objSD.model and objCfg.additional_objects then
-                                                for _, addObj in ipairs(objCfg.additional_objects) do
-                                                    if addObj.prop == objSD.interiorModel and addObj.offset then
-                                                        -- Found config with offset! Calculate precise position
-                                                        local offset = addObj.offset
-                                                        local headingOffset = addObj.heading_offset or 0.0
-                                                        
-                                                        local headingRad = math.rad(objSD.heading or 0.0)
-                                                        local forwardX = -math.sin(headingRad)
-                                                        local forwardY = math.cos(headingRad)
-                                                        
-                                                        spawnCoords = vector3(
-                                                            objSD.coords.x + (offset.x * math.cos(headingRad)) + (offset.y * forwardX),
-                                                            objSD.coords.y + (offset.x * math.sin(headingRad)) + (offset.y * forwardY),
-                                                            objSD.coords.z + offset.z
-                                                        )
-                                                        spawnHeading = (objSD.heading or 0.0) + headingOffset
-                                                        DebugLog("LOADING", "Applied offset for " .. objSD.interiorModel .. ": " .. tostring(offset.x) .. "," .. tostring(offset.y) .. "," .. tostring(offset.z))
-                                                        break
-                                                    end
-                                                end
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-
-                            DebugLog("LOADING", "Spawning interior " .. objSD.interiorModel .. " at Z=" .. spawnCoords.z .. " (Parent Z=" .. objSD.coords.z .. ")")
-                            
-                            local interiorEnt = GetClosestObjectOfType(spawnCoords.x, spawnCoords.y, spawnCoords.z, 0.6, interiorHash, false, true, true)
-                            if interiorEnt == 0 then
-                                interiorEnt = CreateObject(interiorHash, spawnCoords.x, spawnCoords.y, spawnCoords.z, 0, 0, 0)
-                            end
-                            if DoesEntityExist(interiorEnt) then
-                                SetEntityHeading(interiorEnt, spawnHeading)
-                                SetEntityAsMissionEntity(interiorEnt, 1, 1)
-                                SetEntityDynamic(interiorEnt, 0)
-                                
-                                -- CRITICAL FIX for Interior Objects (Z-Drift):
-                                -- 1. Disable collision first
-                                SetEntityCollision(interiorEnt, false, false)
-                                
-                                -- 2. Force coords (clearArea = false)
-                                SetEntityCoords(interiorEnt, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false, false)
-                                
-                                -- 3. Freeze completely
-                                FreezeEntityPosition(interiorEnt, true)
-                                
-                                -- 4. Re-enable collision safely
-                                SetEntityCollision(interiorEnt, true, true)
-                                
-                                -- 5. Final coordinate enforcement (clearArea = false)
-                                SetEntityCoords(interiorEnt, spawnCoords.x, spawnCoords.y, spawnCoords.z, false, false, false, false)
-                                
-                                objectData.interiorEntity = interiorEnt
-                                objectData.interiorModel = objSD.interiorModel
-
-                                -- Special handling for gate doors (mkapi): ensure dual doors exist and are tracked
-                                if objSD.interiorModel == "bazq-sur_mkapi" then
-                                    local doorHash = interiorHash
-                                    local headingRad = math.rad(objSD.heading or 0.0)
-                                    local forwardX = -math.sin(headingRad)
-                                    local forwardY = math.cos(headingRad)
-
-                                    -- First door position (+Y)
-                                    local door1X = objSD.coords.x + (5.37824 * forwardX)
-                                    local door1Y = objSD.coords.y + (5.37824 * forwardY)
-                                    local door1Z = objSD.coords.z
-                                    local door1 = GetClosestObjectOfType(door1X, door1Y, door1Z, 0.6, doorHash, false, true, true)
-                                    if door1 == 0 then
-                                        door1 = interiorEnt
-                                        SetEntityCoords(door1, door1X, door1Y, door1Z, false, false, false, true)
-                                    end
-                                    if DoesEntityExist(door1) then
-                                        SetEntityHeading(door1, (objSD.heading or 0.0) + 90.0)
-                                    end
-
-                                    -- Second door position (-Y)
-                                    local door2X = objSD.coords.x - (5.37824 * forwardX)
-                                    local door2Y = objSD.coords.y - (5.37824 * forwardY)
-                                    local door2Z = objSD.coords.z
-                                    local door2 = GetClosestObjectOfType(door2X, door2Y, door2Z, 0.6, doorHash, false, true, true)
-                                    if door2 == 0 then
-                                        door2 = CreateObject(interiorHash, door2X, door2Y, door2Z, 0, 0, 0)
-                                    end
-                                    if DoesEntityExist(door2) then
-                                        SetEntityHeading(door2, (objSD.heading or 0.0) - 90.0)
-                                        SetEntityAsMissionEntity(door2, 1, 1)
-                                        SetEntityDynamic(door2, 1)
-                                        SetEntityCollision(door2, 1, 1)
-                                    end
-
-                                    -- Track both doors for proper deletion
-                                    if DoesEntityExist(door1) and DoesEntityExist(door2) then
-                                        objectData.interiorEntity = { door1, door2 }
-                                        objectData.hasDualDoors = true
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    
-                    -- Ensure non-door objects are static
-                    if not (objSD.model == "bazq-sur_mkapi" or (objSD.model and string.match(objSD.model, "bazq%-wall2_gate%d+"))) then
-                        SetEntityDynamic(ent, false)
-                    end
-                    
-                    table.insert(spawnedObjects, objectData)
-                    RegisterTargetForEntity(ent)
-                else
-                    DebugLog("LOADING", "CreateFail "..objSD.model)
-                end
-            end
-        end
+    for _, objSD in ipairs(objectsData) do 
+        SpawnPersistentObject(objSD)
+    end
     
     -- Update UI after loading
-    SendNUIMessage({action="updateSpawnedList",data=GetSerializableSpawnedObjects()})
-    DebugLog("LOADING", "Finished loading. Spawned objects count: "..#spawnedObjects)
+    SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+    DebugLog("LOADING", "Finished loading snapshot. Spawned objects count: " .. #spawnedObjects)
 end)
 
--- Receive authoritative IDs from server after save
-RegisterNetEvent("bazq-objectplace:syncObjectIds")
-AddEventHandler("bazq-objectplace:syncObjectIds", function(idList)
-    if type(idList) ~= "table" then return end
-    for i, id in ipairs(idList) do
-        if spawnedObjects[i] then
-            spawnedObjects[i].id = id
+-- DELTA HANDLERS: objectCreated, objectUpdated, objectDeleted, objectsBatchCreated, objectsBatchDeleted, mutationFailed
+
+RegisterNetEvent("bazq-objectplace:objectCreated", function(delta)
+    if type(delta) ~= "table" or not delta.object then return end
+    if CheckAndHandleRevisionMismatch(delta.revision) then return end
+    
+    local reqId = delta.requestId
+    local newObj = delta.object
+    
+    -- Check if this was our pending placement
+    if reqId and pendingPlacedEntities[reqId] then
+        local pending = pendingPlacedEntities[reqId]
+        pendingPlacedEntities[reqId] = nil
+        pending.id = newObj.id
+        
+        -- If user is currently editing this entity, update editing data
+        if editingObjectData and editingObjectData.entity == pending.entity then
+            editingObjectData.id = newObj.id
+        end
+        
+        SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+        return
+    end
+    
+    -- Other clients: spawn persistent entity
+    SpawnPersistentObject(newObj)
+    SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+end)
+
+RegisterNetEvent("bazq-objectplace:objectUpdated", function(delta)
+    if type(delta) ~= "table" or not delta.object then return end
+    if CheckAndHandleRevisionMismatch(delta.revision) then return end
+    
+    local updated = delta.object
+    local objData, idx = GetObjectById(updated.id)
+    if objData and idx then
+        -- If model changed, delete and recreate
+        if updated.model and updated.model ~= objData.model then
+            if objData.entity and DoesEntityExist(objData.entity) then
+                UnregisterTargetForEntity(objData.entity)
+                SafeDeleteEntity(objData.entity)
+            end
+            if objData.interiorEntity then
+                if type(objData.interiorEntity) == "table" then
+                    for _, ent in ipairs(objData.interiorEntity) do
+                        if DoesEntityExist(ent) then SafeDeleteEntity(ent) end
+                    end
+                elseif DoesEntityExist(objData.interiorEntity) then
+                    SafeDeleteEntity(objData.interiorEntity)
+                end
+            end
+            table.remove(spawnedObjects, idx)
+            SpawnPersistentObject(updated)
+        else
+            -- In-place update
+            if updated.coords then
+                objData.coords = vector3(updated.coords.x, updated.coords.y, updated.coords.z)
+            end
+            if updated.heading ~= nil then
+                objData.heading = updated.heading
+            end
+            if updated.rotation then
+                objData.rotation = updated.rotation
+            end
+            if updated.displayName then
+                objData.displayName = updated.displayName
+            end
+            
+            if objData.entity and DoesEntityExist(objData.entity) then
+                SetEntityCoords(objData.entity, objData.coords.x, objData.coords.y, objData.coords.z, false, false, false, false)
+                if objData.rotation then
+                    SetEntityRotation(objData.entity, objData.rotation.x, objData.rotation.y, objData.rotation.z, 2, true)
+                else
+                    SetEntityHeading(objData.entity, objData.heading or 0.0)
+                end
+                FreezeEntityPosition(objData.entity, true)
+            end
+        end
+        SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+    else
+        -- Object was not tracked locally, spawn it
+        SpawnPersistentObject(updated)
+        SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+    end
+end)
+
+RegisterNetEvent("bazq-objectplace:objectDeleted", function(delta)
+    if type(delta) ~= "table" or not delta.id then return end
+    if CheckAndHandleRevisionMismatch(delta.revision) then return end
+    
+    local objData, idx = GetObjectById(delta.id)
+    if objData and idx then
+        if objData.entity and DoesEntityExist(objData.entity) then
+            UnregisterTargetForEntity(objData.entity)
+            SafeDeleteEntity(objData.entity)
+        end
+        if objData.interiorEntity then
+            if type(objData.interiorEntity) == "table" then
+                for _, ent in ipairs(objData.interiorEntity) do
+                    if DoesEntityExist(ent) then SafeDeleteEntity(ent) end
+                end
+            elseif DoesEntityExist(objData.interiorEntity) then
+                SafeDeleteEntity(objData.interiorEntity)
+            end
+        end
+        table.remove(spawnedObjects, idx)
+        SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+    end
+end)
+
+RegisterNetEvent("bazq-objectplace:objectsBatchCreated", function(delta)
+    if type(delta) ~= "table" or not delta.objects then return end
+    if CheckAndHandleRevisionMismatch(delta.revision) then return end
+    
+    local reqId = delta.requestId
+    if reqId and pendingBatchEntities[reqId] then
+        local pendingList = pendingBatchEntities[reqId]
+        pendingBatchEntities[reqId] = nil
+        for i, authoritativeObj in ipairs(delta.objects) do
+            if pendingList[i] then
+                pendingList[i].id = authoritativeObj.id
+            end
+        end
+        SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+        return
+    end
+    
+    for _, obj in ipairs(delta.objects) do
+        SpawnPersistentObject(obj)
+    end
+    SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+end)
+
+RegisterNetEvent("bazq-objectplace:objectsBatchDeleted", function(delta)
+    if type(delta) ~= "table" or not delta.ids then return end
+    if CheckAndHandleRevisionMismatch(delta.revision) then return end
+    
+    local idSet = {}
+    for _, id in ipairs(delta.ids) do idSet[id] = true end
+    
+    for i = #spawnedObjects, 1, -1 do
+        local objData = spawnedObjects[i]
+        if objData and objData.id and idSet[objData.id] then
+            if objData.entity and DoesEntityExist(objData.entity) then
+                UnregisterTargetForEntity(objData.entity)
+                SafeDeleteEntity(objData.entity)
+            end
+            if objData.interiorEntity then
+                if type(objData.interiorEntity) == "table" then
+                    for _, ent in ipairs(objData.interiorEntity) do
+                        if DoesEntityExist(ent) then SafeDeleteEntity(ent) end
+                    end
+                elseif DoesEntityExist(objData.interiorEntity) then
+                    SafeDeleteEntity(objData.interiorEntity)
+                end
+            end
+            table.remove(spawnedObjects, i)
         end
     end
+    SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+end)
+
+RegisterNetEvent("bazq-objectplace:mutationFailed", function(data)
+    local actionName = data and data.action or "mutation"
+    local reasonMsg = data and data.reason or "Unknown error"
+    DebugLog("SAVE", string.format("Server rejected %s: %s", actionName, reasonMsg))
     SendNUIMessage({
-        action = "updateSpawnedList",
-        data = GetSerializableSpawnedObjects()
+        action = 'showError',
+        message = string.format("Operation failed (%s): %s", actionName, reasonMsg)
     })
+    
+    local reqId = data and data.requestId
+    if reqId then
+        if pendingPlacedEntities[reqId] then
+            local pending = pendingPlacedEntities[reqId]
+            if pending.entity and DoesEntityExist(pending.entity) then
+                SafeDeleteEntity(pending.entity)
+            end
+            if pending.interiorEntity then
+                if type(pending.interiorEntity) == "table" then
+                    for _, ent in ipairs(pending.interiorEntity) do
+                        if DoesEntityExist(ent) then SafeDeleteEntity(ent) end
+                    end
+                elseif DoesEntityExist(pending.interiorEntity) then
+                    SafeDeleteEntity(pending.interiorEntity)
+                end
+            end
+            for i = #spawnedObjects, 1, -1 do
+                if spawnedObjects[i].entity == pending.entity then
+                    table.remove(spawnedObjects, i)
+                    break
+                end
+            end
+            pendingPlacedEntities[reqId] = nil
+        end
+        if pendingBatchEntities[reqId] then
+            local pendingList = pendingBatchEntities[reqId]
+            for _, item in ipairs(pendingList) do
+                if item.entity and DoesEntityExist(item.entity) then
+                    SafeDeleteEntity(item.entity)
+                end
+                for i = #spawnedObjects, 1, -1 do
+                    if spawnedObjects[i].entity == item.entity then
+                        table.remove(spawnedObjects, i)
+                        break
+                    end
+                end
+            end
+            pendingBatchEntities[reqId] = nil
+        end
+        SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
+    end
+end)
+
+-- Receive authoritative IDs from server after legacy save (kept for compatibility)
+RegisterNetEvent("bazq-objectplace:syncObjectIds")
+AddEventHandler("bazq-objectplace:syncObjectIds", function(idList)
+    DebugLog("SAVE", "Received legacy syncObjectIds (ignored in Phase 3)")
 end)
 -- Commands removed - only F7 key access for admins
 
@@ -3594,6 +3837,7 @@ local function BuildPathProps(pointA, pointB, selectedItem, isPackage, customWid
     local dist = #(pointB - pointA)
     if dist < 0.1 then return false, 0.0 end
     
+    local pathStartIndex = #spawnedObjects + 1
     local dir = (pointB - pointA) / dist
     local startDist = 0.0
     
@@ -3946,7 +4190,32 @@ local function BuildPathProps(pointA, pointB, selectedItem, isPackage, customWid
     end
     
     if spawnedCount > 0 or spawnTower then
-        SaveObjectsToServer()
+        local batchReqId = GenerateRequestId("path")
+        local newBatch = {}
+        local newBatchEntities = {}
+        for idx = pathStartIndex, #spawnedObjects do
+            local item = spawnedObjects[idx]
+            if item then
+                table.insert(newBatchEntities, item)
+                table.insert(newBatch, {
+                    model = item.model,
+                    coords = { x = item.coords.x, y = item.coords.y, z = item.coords.z },
+                    heading = item.heading,
+                    rotation = item.rotation,
+                    interiorModel = item.interiorModel,
+                    hasDualDoors = item.hasDualDoors,
+                    playerName = item.playerName,
+                    timestamp = item.timestamp
+                })
+            end
+        end
+        
+        pendingBatchEntities[batchReqId] = newBatchEntities
+        TriggerServerEvent("bazq-objectplace:batchPlaceObjects", {
+            objects = newBatch,
+            requestId = batchReqId
+        })
+        
         SendNUIMessage({
             action = 'updateSpawnedList',
             data = GetSerializableSpawnedObjects()
@@ -4599,7 +4868,12 @@ RegisterNUICallback('renameObject', function(data, cb)
     
     if obj and index and newName and newName ~= "" then
         spawnedObjects[index].displayName = newName
-        SaveObjectsToServer()
+        if obj.id then
+            TriggerServerEvent("bazq-objectplace:updateObject", {
+                id = obj.id,
+                changes = { displayName = newName }
+            })
+        end
         SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
         DebugLog("USER", "Renamed object " .. tostring(obj.id or index) .. " to: " .. newName)
         cb({status = 'ok'})
