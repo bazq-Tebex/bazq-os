@@ -890,9 +890,12 @@ function escapeHtml(text) {
 // Main application code
 window.addEventListener("DOMContentLoaded", () => {
   const uiContainer = document.querySelector(".ui-container");
+  let gPathConfig = { packages: {}, props: {} };
+  let randomizerProps = [];
 
   // Navigation buttons and View Panels
   const navLibraryBtn = document.getElementById("navLibraryBtn");
+  const navPathBtn = document.getElementById("navPathBtn");
   const navManualBtn = document.getElementById("navManualBtn");
   const navPlacedBtn = document.getElementById("navPlacedBtn");
   const navSettingsBtn = document.getElementById("navSettingsBtn");
@@ -904,12 +907,13 @@ window.addEventListener("DOMContentLoaded", () => {
   const freecamBtn = document.getElementById("freecamBtn");
   const cleanZoneBtn = document.getElementById("cleanZoneBtn");
   const libraryView = document.getElementById("libraryView");
+  const pathCreatorView = document.getElementById("pathCreatorView");
   const manualSpawnerView = document.getElementById("manualSpawnerView");
   const placedObjectsView = document.getElementById("placedObjectsView");
   const settingsView = document.getElementById("settingsView");
   const usersView = document.getElementById("usersView");
-  const navButtons = [navLibraryBtn, navManualBtn, navPlacedBtn, navSettingsBtn, navUsersBtn];
-  const viewPanels = [libraryView, manualSpawnerView, placedObjectsView, settingsView, usersView];
+  const navButtons = [navLibraryBtn, navPathBtn, navManualBtn, navPlacedBtn, navSettingsBtn, navUsersBtn];
+  const viewPanels = [libraryView, pathCreatorView, manualSpawnerView, placedObjectsView, settingsView, usersView];
 
   // Object library variables
   let allMasterItems = [];
@@ -1032,6 +1036,7 @@ window.addEventListener("DOMContentLoaded", () => {
     viewPanels.forEach(panel => panel?.classList.remove("active-view"));
 
     if (targetView === libraryView) navLibraryBtn?.classList.add("active-nav");
+    else if (targetView === pathCreatorView) navPathBtn?.classList.add("active-nav");
     else if (targetView === manualSpawnerView) navManualBtn?.classList.add("active-nav");
     else if (targetView === placedObjectsView) navPlacedBtn?.classList.add("active-nav");
     else if (targetView === settingsView) navSettingsBtn?.classList.add("active-nav");
@@ -1161,6 +1166,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // Navigation event listeners
   navLibraryBtn?.addEventListener("click", () => switchView(libraryView));
+  navPathBtn?.addEventListener("click", () => switchView(pathCreatorView));
   navManualBtn?.addEventListener("click", () => switchView(manualSpawnerView));
   navPlacedBtn?.addEventListener("click", () => switchView(placedObjectsView));
   navSettingsBtn?.addEventListener("click", () => switchView(settingsView));
@@ -1171,6 +1177,483 @@ window.addEventListener("DOMContentLoaded", () => {
       // Initialize user management when view is opened
       if (typeof initializeUserManagement === 'function') {
         initializeUserManagement();
+      }
+    });
+  }
+
+  // Owner Lock Event Listener
+  const lockNonOwnersCheckbox = document.getElementById("lockNonOwnersCheckbox");
+  if (lockNonOwnersCheckbox) {
+    lockNonOwnersCheckbox.addEventListener("change", (e) => {
+      const locked = e.target.checked;
+      fetch("https://bazq-os/saveLockState", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ locked: locked })
+      }).catch(err => { if (DEBUG_MODE) console.error("Error saving lock state:", err); });
+      addLogEntry(`Spawner lock: ${locked ? "Enabled" : "Disabled"}`, "info");
+    });
+  }
+
+  // Path Creator UI event listeners
+  const pathPropSelect = document.getElementById("pathPropSelect");
+  const pathCustomModelGroup = document.getElementById("pathCustomModelGroup");
+  const startPathDrawingBtn = document.getElementById("startPathDrawingBtn");
+
+  // --- PACKAGE WEIGHT CUSTOMIZER ---
+  const defaultPackages = {
+    "wall_pack_1": [
+      { model: "bazq-sur1", weight: 40, width: 10.0 },
+      { model: "bazq-sur2", weight: 15, width: 10.0 },
+      { model: "bazq-sur3", weight: 15, width: 10.0 },
+      { model: "bazq-sur4", weight: 15, width: 10.0 },
+      { model: "bazq-sur5", weight: 15, width: 10.0 }
+    ],
+    "wall_pack_2": [
+      { model: "bazq-wall2_wall1", weight: 40, width: 2.0 },
+      { model: "bazq-wall2_wall2", weight: 15, width: 2.0 },
+      { model: "bazq-wall2_wall3", weight: 15, width: 2.0 },
+      { model: "bazq-wall2_wall4", weight: 15, width: 2.0 },
+      { model: "bazq-wall2_wall5", weight: 15, width: 2.0 }
+    ],
+    "wall3": [
+      { model: "bazq-wood_prop1", weight: 10, width: 0.30 },
+      { model: "bazq-wood_prop2", weight: 10, width: 0.37 },
+      { model: "bazq-wood_prop3", weight: 10, width: 0.40 },
+      { model: "bazq-wood_prop4", weight: 10, width: 0.46 },
+      { model: "bazq-wood_prop5", weight: 10, width: 0.50 },
+      { model: "bazq-wall3_wall1", weight: 15, width: 1.98 },
+      { model: "bazq-wall3_wall2", weight: 15, width: 1.95 },
+      { model: "bazq-wall3_wall3", weight: 20, width: 2.01 }
+    ]
+  };
+
+  const packageWeightsGroup = document.getElementById("packageWeightsGroup");
+  
+  // Live sync path configuration options with client script during drawing mode
+  function sendUpdatedOptions() {
+    const snapToGround = document.getElementById("pathSnapToGround")?.checked;
+    const alignToGround = document.getElementById("pathAlignToGround")?.checked;
+    const randomRotation = document.getElementById("pathRandomRotation")?.checked;
+    const cornerTowers = document.getElementById("pathCornerTowers")?.checked;
+    const cornerAngle = parseFloat(document.getElementById("pathCornerAngle")?.value || "90.0");
+    const enableDecals = document.getElementById("pathEnableDecals")?.checked;
+    const decalFrequency = parseInt(document.getElementById("pathDecalFrequency")?.value || "20");
+    const axisLock = document.getElementById("pathAxisLock")?.checked;
+    const overlapMargin = parseFloat(document.getElementById("pathOverlapMargin")?.value || "1.5");
+    
+    const activeDecals = [];
+    document.querySelectorAll(".decal-badge.active").forEach(btn => {
+      const decalId = btn.getAttribute("data-decal");
+      activeDecals.push(`bazq-wall2_walldecal${decalId}`);
+    });
+
+    fetch("https://bazq-os/updateDrawingOptions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        snapToGround: !!snapToGround,
+        alignToGround: !!alignToGround,
+        randomRotation: !!randomRotation,
+        cornerTowers: !!cornerTowers,
+        cornerAngle: cornerAngle,
+        enableDecals: !!enableDecals,
+        decalFrequency: decalFrequency,
+        activeDecals: activeDecals,
+        axisLock: !!axisLock,
+        overlapMargin: overlapMargin
+      })
+    }).catch(err => {
+      // Ignore network errors when not drawing
+    });
+  }
+
+  // Bind change/input event listeners for real-time synchronization
+  setTimeout(() => {
+    ["pathSnapToGround", "pathAlignToGround", "pathRandomRotation", "pathCornerTowers", "pathCornerAngle", "pathEnableDecals", "pathDecalFrequency", "pathAxisLock", "pathOverlapMargin"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener("change", sendUpdatedOptions);
+        el.addEventListener("input", sendUpdatedOptions);
+      }
+    });
+
+    // Bind click listeners to decal badges to sync their state
+    document.querySelectorAll(".decal-badge").forEach(btn => {
+      btn.addEventListener("click", () => {
+        setTimeout(sendUpdatedOptions, 10);
+      });
+    });
+  }, 100);
+
+  const packageWeightsInputs = document.getElementById("packageWeightsInputs");
+  const packageWeightsTotal = document.getElementById("packageWeightsTotal");
+  const packageWeightsStatus = document.getElementById("packageWeightsStatus");
+  const packageWeightsTotalBanner = document.getElementById("packageWeightsTotalBanner");
+
+  let currentPackageProps = [];
+
+  function updatePackageWeightsUI(selectedValue) {
+    if (!packageWeightsGroup || !packageWeightsInputs) return;
+
+    let pkgKey = selectedValue;
+    if (selectedValue === "bazq-wall3") {
+      pkgKey = "wall3";
+    }
+
+    if (defaultPackages[pkgKey]) {
+      packageWeightsGroup.style.display = "block";
+      currentPackageProps = JSON.parse(JSON.stringify(defaultPackages[pkgKey])); // Deep copy
+      renderPackageWeights();
+    } else {
+      packageWeightsGroup.style.display = "none";
+      currentPackageProps = [];
+    }
+  }
+
+  function renderPackageWeights() {
+    packageWeightsInputs.innerHTML = "";
+    currentPackageProps.forEach((prop, index) => {
+      const itemDiv = document.createElement("div");
+      itemDiv.style.cssText = "display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px;";
+
+      const label = document.createElement("label");
+      label.textContent = prop.model.replace("bazq-", "");
+      label.style.cssText = "font-size: 13px; color: #ccc; flex: 1.5; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; margin-bottom: 0;";
+
+      const input = document.createElement("input");
+      input.type = "number";
+      input.value = prop.weight;
+      input.min = "0";
+      input.max = "100";
+      input.style.cssText = "width: 55px; background: rgba(5, 25, 3, 0.6); border: 1px solid rgba(var(--primary-rgb), 0.8); color: white; border-radius: 4px; padding: 4px; text-align: center; font-size: 12px;";
+
+      input.addEventListener("input", (e) => {
+        let val = parseInt(e.target.value) || 0;
+        if (val < 0) val = 0;
+        if (val > 100) val = 100;
+        prop.weight = val;
+        recalculatePackageTotal();
+      });
+
+      itemDiv.appendChild(label);
+      itemDiv.appendChild(input);
+      packageWeightsInputs.appendChild(itemDiv);
+    });
+
+    recalculatePackageTotal();
+  }
+
+  function recalculatePackageTotal() {
+    if (!packageWeightsTotal || !packageWeightsStatus || !packageWeightsTotalBanner) return;
+    let total = 0;
+    currentPackageProps.forEach(prop => total += prop.weight);
+    packageWeightsTotal.textContent = total;
+
+    if (total === 100) {
+      packageWeightsTotalBanner.style.color = "#22c55e"; // green
+      packageWeightsStatus.textContent = "Valid";
+      packageWeightsStatus.style.color = "#22c55e";
+    } else {
+      packageWeightsTotalBanner.style.color = "#ef4444"; // red
+      packageWeightsStatus.textContent = "Must equal 100%";
+      packageWeightsStatus.style.color = "#ef4444";
+    }
+  }
+
+  function updateDecalsVisibility(selectedValue) {
+    const pathDecalsGroup = document.getElementById("pathDecalsGroup");
+    if (!pathDecalsGroup) return;
+    const isConcrete = (selectedValue === "wall_pack_2" || selectedValue.startsWith("bazq-wall2_wall"));
+    pathDecalsGroup.style.display = isConcrete ? "block" : "none";
+  }
+
+  if (pathPropSelect && pathCustomModelGroup) {
+    pathPropSelect.addEventListener("change", (e) => {
+      if (e.target.value === "custom") {
+        pathCustomModelGroup.style.display = "block";
+      } else {
+        pathCustomModelGroup.style.display = "none";
+      }
+      updatePackageWeightsUI(e.target.value);
+      updateDecalsVisibility(e.target.value);
+    });
+    // Call initially to hide/show on load
+    updateDecalsVisibility(pathPropSelect.value);
+  }
+
+  // --- NEW RANDOMIZER LOGIC ---
+  const pathModeRadios = document.querySelectorAll('input[name="pathMode"]');
+  const pathSingleGroup = document.getElementById("pathSingleGroup");
+  const pathMultiGroup = document.getElementById("pathMultiGroup");
+  const addMultiPropBtn = document.getElementById("addMultiPropBtn");
+  const multiPropModel = document.getElementById("multiPropModel");
+  const multiPropDensity = document.getElementById("multiPropDensity");
+  const multiPropWidth = document.getElementById("multiPropWidth");
+
+  function renderMultiPropList() {
+    const listContainer = document.getElementById("multiPropList");
+    if (!listContainer) return;
+    
+    if (randomizerProps.length === 0) {
+      listContainer.innerHTML = '<div style="text-align:center; color:#94a3b8; padding: 10px; font-size:12px;">No props added yet</div>';
+      updateWeightBanner();
+      return;
+    }
+    
+    listContainer.innerHTML = "";
+    randomizerProps.forEach((prop, index) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; margin-bottom: 4px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08); font-size: 13px;";
+      row.innerHTML = `
+        <div style="display: flex; flex-direction: column; gap: 2px; flex: 1;">
+          <span style="color: #fff; font-weight: 500; font-family: monospace;">${escapeHtml(prop.model)}</span>
+          <span style="color: #94a3b8; font-size: 11px;">Width: ${prop.width}m | Weight: ${prop.weight}%</span>
+        </div>
+        <button class="remove-prop-btn" data-index="${index}" style="background: none; border: none; color: #ef4444; cursor: pointer; padding: 4px 8px; font-size: 13px;"><i class="fas fa-trash-alt"></i></button>
+      `;
+      listContainer.appendChild(row);
+    });
+    
+    listContainer.querySelectorAll(".remove-prop-btn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        const idx = parseInt(e.currentTarget.getAttribute("data-index"));
+        randomizerProps.splice(idx, 1);
+        renderMultiPropList();
+      });
+    });
+    
+    updateWeightBanner();
+  }
+
+  function updateWeightBanner() {
+    const totalWeightEl = document.getElementById("multiPropTotalWeight");
+    const statusEl = document.getElementById("multiPropWeightStatus");
+    const totalBanner = document.getElementById("multiPropTotalBanner");
+    
+    let totalWeight = 0;
+    randomizerProps.forEach(p => {
+      totalWeight += p.weight;
+    });
+    
+    if (totalWeightEl) totalWeightEl.textContent = totalWeight;
+    
+    const pathMode = document.querySelector('input[name="pathMode"]:checked')?.value || "single";
+    
+    if (pathMode === "multi") {
+      if (totalWeight === 100) {
+        if (statusEl) {
+          statusEl.textContent = "Ready";
+          statusEl.style.color = "#22c55e";
+        }
+        if (totalBanner) totalBanner.style.color = "#22c55e";
+        if (startPathDrawingBtn) startPathDrawingBtn.disabled = false;
+      } else {
+        if (statusEl) {
+          statusEl.textContent = "Must equal 100%";
+          statusEl.style.color = "#ef4444";
+        }
+        if (totalBanner) totalBanner.style.color = "#ef4444";
+        if (startPathDrawingBtn) startPathDrawingBtn.disabled = true;
+      }
+    } else {
+      if (startPathDrawingBtn) startPathDrawingBtn.disabled = false;
+    }
+  }
+
+  if (pathModeRadios) {
+    pathModeRadios.forEach(radio => {
+      radio.addEventListener("change", (e) => {
+        const mode = e.target.value;
+        if (mode === "single") {
+          if (pathSingleGroup) pathSingleGroup.style.display = "block";
+          if (pathMultiGroup) pathMultiGroup.style.display = "none";
+          updateWeightBanner();
+        } else {
+          if (pathSingleGroup) pathSingleGroup.style.display = "none";
+          if (pathMultiGroup) pathMultiGroup.style.display = "block";
+          updateWeightBanner();
+        }
+      });
+    });
+  }
+
+  if (multiPropModel && multiPropWidth) {
+    multiPropModel.addEventListener("input", (e) => {
+      const val = e.target.value.trim().toLowerCase();
+      if (gPathConfig && gPathConfig.props) {
+        let matchedWidth = null;
+        for (const [propName, width] of Object.entries(gPathConfig.props)) {
+          if (propName.toLowerCase() === val) {
+            matchedWidth = width;
+            break;
+          }
+        }
+        if (matchedWidth !== null) {
+          multiPropWidth.value = matchedWidth;
+        }
+      }
+    });
+  }
+
+  if (addMultiPropBtn) {
+    addMultiPropBtn.addEventListener("click", () => {
+      const model = multiPropModel ? multiPropModel.value.trim() : "";
+      const weight = multiPropDensity ? parseInt(multiPropDensity.value) : 0;
+      const width = multiPropWidth ? parseFloat(multiPropWidth.value) : 0;
+      
+      if (!model) {
+        addLogEntry("Please enter a model name", "error");
+        return;
+      }
+      if (isNaN(weight) || weight <= 0 || weight > 100) {
+        addLogEntry("Weight must be between 1 and 100", "error");
+        return;
+      }
+      if (isNaN(width) || width <= 0) {
+        addLogEntry("Width must be greater than 0", "error");
+        return;
+      }
+      
+      let currentWeight = 0;
+      randomizerProps.forEach(p => currentWeight += p.weight);
+      if (currentWeight + weight > 100) {
+        addLogEntry(`Adding this prop would exceed 100% total weight (current: ${currentWeight}%, requested: ${weight}%)`, "error");
+        return;
+      }
+      
+      randomizerProps.push({
+        model: model,
+        weight: weight,
+        width: width
+      });
+      
+      if (multiPropModel) multiPropModel.value = "";
+      if (multiPropDensity) multiPropDensity.value = "";
+      if (multiPropWidth) multiPropWidth.value = "";
+      
+      renderMultiPropList();
+      addLogEntry(`Added ${model} to randomizer (${weight}%, ${width}m)`, "info");
+    });
+  }
+
+  // Decal Badge Toggles
+  document.querySelectorAll(".decal-badge").forEach(btn => {
+    btn.addEventListener("click", () => {
+      btn.classList.toggle("active");
+    });
+  });
+
+  if (startPathDrawingBtn) {
+    startPathDrawingBtn.addEventListener("click", () => {
+      const pathMode = document.querySelector('input[name="pathMode"]:checked')?.value || "single";
+      const snapToGround = document.getElementById("pathSnapToGround")?.checked;
+      const alignToGround = document.getElementById("pathAlignToGround")?.checked;
+      const randomRotation = document.getElementById("pathRandomRotation")?.checked;
+      const cornerTowers = document.getElementById("pathCornerTowers")?.checked;
+      const cornerAngle = parseFloat(document.getElementById("pathCornerAngle")?.value || "90.0");
+      const enableDecals = document.getElementById("pathEnableDecals")?.checked;
+      const decalFrequency = parseInt(document.getElementById("pathDecalFrequency")?.value || "20");
+      const axisLock = document.getElementById("pathAxisLock")?.checked;
+      const overlapMargin = parseFloat(document.getElementById("pathOverlapMargin")?.value || "1.5");
+      
+      const activeDecals = [];
+      document.querySelectorAll(".decal-badge.active").forEach(btn => {
+        const decalId = btn.getAttribute("data-decal");
+        activeDecals.push(`bazq-wall2_walldecal${decalId}`);
+      });
+      
+      if (pathMode === "single") {
+        let model = pathPropSelect ? pathPropSelect.value : "";
+        let width = 1.0;
+        let customPackageProps = [];
+        
+        let pkgKey = model;
+        if (model === "bazq-wall3") pkgKey = "wall3";
+        
+        if (defaultPackages[pkgKey]) {
+          let total = 0;
+          currentPackageProps.forEach(p => total += p.weight);
+          if (total !== 100) {
+            addLogEntry("Total package weight must equal exactly 100% to draw", "error");
+            return;
+          }
+          customPackageProps = currentPackageProps;
+        }
+        
+        if (model === "custom") {
+          const customModelInput = document.getElementById("pathCustomModelInput");
+          const customModelWidth = document.getElementById("pathCustomModelWidth");
+          
+          model = customModelInput ? customModelInput.value.trim() : "";
+          width = customModelWidth ? parseFloat(customModelWidth.value) : 1.0;
+          
+          if (!model) {
+            addLogEntry("Please enter a custom model name", "error");
+            return;
+          }
+          if (isNaN(width) || width <= 0) {
+            addLogEntry("Please enter a valid width", "error");
+            return;
+          }
+        }
+        
+        addLogEntry(`Starting path drawing: ${model} (width: ${width}m)`, "info");
+        
+        hideUI();
+        fetch("https://bazq-os/startPathDrawing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "single",
+            model: model,
+            width: width,
+            customPackageProps: customPackageProps,
+            options: {
+              snapToGround: !!snapToGround,
+              alignToGround: !!alignToGround,
+              randomRotation: !!randomRotation,
+              cornerTowers: !!cornerTowers,
+              cornerAngle: cornerAngle,
+              enableDecals: !!enableDecals,
+              decalFrequency: decalFrequency,
+              activeDecals: activeDecals,
+              axisLock: !!axisLock,
+              overlapMargin: overlapMargin
+            }
+          })
+        });
+      } else {
+        let totalWeight = 0;
+        randomizerProps.forEach(p => totalWeight += p.weight);
+        if (totalWeight !== 100) {
+          addLogEntry("Total weight must equal exactly 100% to draw", "error");
+          return;
+        }
+        
+        addLogEntry(`Starting path drawing with randomizer (${randomizerProps.length} props)`, "info");
+        
+        hideUI();
+        fetch("https://bazq-os/startPathDrawing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "multi",
+            randomizerProps: randomizerProps,
+            options: {
+              snapToGround: !!snapToGround,
+              alignToGround: !!alignToGround,
+              randomRotation: !!randomRotation,
+              cornerTowers: !!cornerTowers,
+              cornerAngle: cornerAngle,
+              enableDecals: !!enableDecals,
+              decalFrequency: decalFrequency,
+              activeDecals: activeDecals,
+              axisLock: !!axisLock,
+              overlapMargin: overlapMargin
+            }
+          })
+        });
       }
     });
   }
@@ -1609,6 +2092,7 @@ window.addEventListener("DOMContentLoaded", () => {
       const objectItem = document.createElement('div');
       objectItem.className = 'object-grid-item';
       objectItem.dataset.index = obj.originalIndex;
+      objectItem.dataset.id = obj.id || '';
 
       const icon = getModelIcon(obj.model);
       const displayName = obj.displayName || obj.model.replace(/^bazq-/, '').replace(/_/g, ' ');
@@ -1624,19 +2108,19 @@ window.addEventListener("DOMContentLoaded", () => {
           </div>
         </div>
         <div class="grid-object-actions">
-          <button class="grid-action-btn teleport-btn" data-index="${obj.originalIndex}" title="Teleport to Object">
+          <button class="grid-action-btn teleport-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Teleport to Object">
             <i class="fas fa-location-arrow"></i>
           </button>
-          <button class="grid-action-btn rename-btn" data-index="${obj.originalIndex}" title="Rename">
+          <button class="grid-action-btn rename-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Rename">
             <i class="fas fa-tag"></i>
           </button>
-          <button class="grid-action-btn edit-btn" data-index="${obj.originalIndex}" title="Edit">
+          <button class="grid-action-btn edit-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Edit">
             <i class="fas fa-edit"></i>
           </button>
-          <button class="grid-action-btn duplicate-btn" data-index="${obj.originalIndex}" title="Duplicate">
+          <button class="grid-action-btn duplicate-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Duplicate">
             <i class="fas fa-copy"></i>
           </button>
-          <button class="grid-action-btn delete-btn" data-index="${obj.originalIndex}" title="Delete">
+          <button class="grid-action-btn delete-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Delete">
             <i class="fas fa-trash"></i>
           </button>
         </div>
@@ -1645,7 +2129,7 @@ window.addEventListener("DOMContentLoaded", () => {
       // Add click handler for object selection
       objectItem.addEventListener('click', (e) => {
         if (!e.target.closest('.grid-object-actions')) {
-          selectObject(obj.originalIndex);
+          selectObject(obj.originalIndex, obj.id);
         }
       });
 
@@ -1659,35 +2143,40 @@ window.addEventListener("DOMContentLoaded", () => {
       if (teleportBtn) {
         teleportBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          teleportToObject(e.target.closest('.teleport-btn').dataset.index);
+          const btn = e.target.closest('.teleport-btn');
+          teleportToObject(btn.dataset.index, btn.dataset.id);
         });
       }
 
       if (renameBtn) {
         renameBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          renamePlacedObject(e.target.closest('.rename-btn').dataset.index);
+          const btn = e.target.closest('.rename-btn');
+          renamePlacedObject(btn.dataset.index, btn.dataset.id);
         });
       }
 
       if (editBtn) {
         editBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          editPlacedObject(e.target.closest('.edit-btn').dataset.index);
+          const btn = e.target.closest('.edit-btn');
+          editPlacedObject(btn.dataset.index, btn.dataset.id);
         });
       }
 
       if (duplicateBtn) {
         duplicateBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          duplicatePlacedObject(e.target.closest('.duplicate-btn').dataset.index);
+          const btn = e.target.closest('.duplicate-btn');
+          duplicatePlacedObject(btn.dataset.index, btn.dataset.id);
         });
       }
 
       if (deleteBtn) {
         deleteBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          deletePlacedObject(e.target.closest('.delete-btn').dataset.index);
+          const btn = e.target.closest('.delete-btn');
+          deletePlacedObject(btn.dataset.index, btn.dataset.id);
         });
       }
 
@@ -1698,16 +2187,16 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   // Select object function
-  function selectObject(index) {
-    if (!index) return;
+  function selectObject(index, id) {
+    if (!index && !id) return;
 
     // Send NUI callback to server
     fetch('https://bazq-os/selectObject', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ index: parseInt(index) })
+      body: JSON.stringify({ index: parseInt(index), id: id || undefined })
     }).then(() => {
-      addLogEntry(`Selected object at index ${index}`, 'info');
+      addLogEntry(`Selected object ${id || ('index ' + index)}`, 'info');
     }).catch(error => {
       if (DEBUG_MODE) console.error("Error selecting object:", error);
       addLogEntry(`Failed to select object: ${error.message}`, 'error');
@@ -1727,37 +2216,38 @@ window.addEventListener("DOMContentLoaded", () => {
     return 'Other';
   }
 
-  function editPlacedObject(index) {
-    addLogEntry(`Editing object at index ${index}`, 'info');
+  function editPlacedObject(index, id) {
+    addLogEntry(`Editing object ${id || ('index ' + index)}`, 'info');
     fetch('https://bazq-os/editSpawnedObject', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ index: parseInt(index) })
+      body: JSON.stringify({ index: parseInt(index), id: id || undefined })
     }).catch(error => {
       if (DEBUG_MODE) console.error("Error editing object:", error);
       addLogEntry(`Failed to edit object: ${error.message}`, 'error');
     });
   }
 
-  function teleportToObject(index) {
-    addLogEntry(`Teleporting to object at index ${index}`, 'info');
+  function teleportToObject(index, id) {
+    addLogEntry(`Teleporting to object ${id || ('index ' + index)}`, 'info');
     fetch('https://bazq-os/teleportToObject', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ index: parseInt(index) })
+      body: JSON.stringify({ index: parseInt(index), id: id || undefined })
     }).catch(error => {
       if (DEBUG_MODE) console.error("Error teleporting to object:", error);
       addLogEntry(`Failed to teleport: ${error.message}`, 'error');
     });
   }
 
-  function duplicatePlacedObject(index) {
-    addLogEntry(`Duplicating object at index ${index}`, 'info');
+  function duplicatePlacedObject(index, id) {
+    addLogEntry(`Duplicating object ${id || ('index ' + index)}`, 'info');
     fetch('https://bazq-os/duplicateObject', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         index: parseInt(index),
+        id: id || undefined,
         options: getPlacementOptions()
       })
     }).catch(error => {
@@ -1766,17 +2256,17 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  function deletePlacedObject(index) {
+  function deletePlacedObject(index, id) {
     showConfirmDialog(
       'Delete Object',
       'Are you sure you want to delete this object?',
       'This action cannot be undone.',
       () => {
-        addLogEntry(`Deleting object at index ${index}`, 'info');
+        addLogEntry(`Deleting object ${id || ('index ' + index)}`, 'info');
         fetch('https://bazq-os/deleteObject', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ index: parseInt(index) })
+          body: JSON.stringify({ index: parseInt(index), id: id || undefined })
         }).catch(error => {
           if (DEBUG_MODE) console.error("Error deleting object:", error);
           addLogEntry(`Failed to delete object: ${error.message}`, 'error');
@@ -1864,6 +2354,18 @@ window.addEventListener("DOMContentLoaded", () => {
       }
       keepMenuOpenCheckbox.checked = keepMenuOpen;
       debugLog("Set keepMenuOpen to:", keepMenuOpen);
+    }
+
+    // Owner Lock Setting (Only visible/controllable for Owner)
+    const ownerLockSetting = document.getElementById('ownerLockSetting');
+    const lockNonOwnersCheckbox = document.getElementById('lockNonOwnersCheckbox');
+    if (userSettings && userSettings.role === 'owner') {
+      if (ownerLockSetting) ownerLockSetting.style.display = 'block';
+      if (lockNonOwnersCheckbox) {
+        lockNonOwnersCheckbox.checked = !!userSettings.lockNonOwners;
+      }
+    } else {
+      if (ownerLockSetting) ownerLockSetting.style.display = 'none';
     }
   }
 
@@ -2065,6 +2567,10 @@ window.addEventListener("DOMContentLoaded", () => {
       case "open":
         debugLog("Received open message:", data);
 
+        if (data.pathConfig) {
+          gPathConfig = data.pathConfig;
+        }
+
         // Populate objects list
         if (data.objects && Array.isArray(data.objects)) {
           debugLog("Populating object list with", data.objects.length, "objects:", data.objects);
@@ -2091,6 +2597,10 @@ window.addEventListener("DOMContentLoaded", () => {
 
         // Show UI
         showUI();
+        
+        if (pathPropSelect) {
+          updatePackageWeightsUI(pathPropSelect.value);
+        }
 
         // Notify client that UI is ready for focus
         setTimeout(() => {
@@ -2112,6 +2622,18 @@ window.addEventListener("DOMContentLoaded", () => {
         break;
       case "toggle":
         toggleUI();
+        break;
+      case "enterDrawingMode":
+        document.body.classList.add("drawing-mode");
+        break;
+      case "exitDrawingMode":
+        document.body.classList.remove("drawing-mode");
+        break;
+      case "updateAxisLockCheckbox":
+        const axisLockCheckbox = document.getElementById("pathAxisLock");
+        if (axisLockCheckbox) {
+          axisLockCheckbox.checked = !!data.state;
+        }
         break;
 
       case "log":
@@ -2187,10 +2709,16 @@ window.addEventListener("DOMContentLoaded", () => {
         debugLog("Freecam state updated:", isActive);
         addLogEntry(`Freecam ${isActive ? 'enabled' : 'disabled'}`, 'info');
         break;
+      case "updateLockState":
+        const lockCb = document.getElementById("lockNonOwnersCheckbox");
+        if (lockCb) {
+          lockCb.checked = !!data.locked;
+        }
+        break;
     }
   });
 
-  function selectObject(index) {
+  function selectObject(index, id) {
     // Remove previous selection
     const previousSelected = document.querySelector('.compact-object-item.selected');
     if (previousSelected) {
@@ -2201,7 +2729,7 @@ window.addEventListener("DOMContentLoaded", () => {
     selectedObjectIndex = index;
 
     // Add selection to new item
-    const newSelected = document.querySelector(`[data-index="${index}"]`);
+    const newSelected = (id && document.querySelector(`[data-id="${id}"]`)) || document.querySelector(`[data-index="${index}"]`);
     if (newSelected) {
       newSelected.classList.add('selected');
     }
@@ -2210,9 +2738,9 @@ window.addEventListener("DOMContentLoaded", () => {
     fetch('https://bazq-os/selectObject', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ index: parseInt(index) })
+      body: JSON.stringify({ index: parseInt(index), id: id || undefined })
     }).then(() => {
-      addLogEntry(`Selected object at index ${index}`, 'info');
+      addLogEntry(`Selected object ${id || ('index ' + index)}`, 'info');
     }).catch(error => {
       if (DEBUG_MODE) console.error("Error selecting object:", error);
       addLogEntry(`Failed to select object: ${error.message}`, 'error');
@@ -2220,14 +2748,14 @@ window.addEventListener("DOMContentLoaded", () => {
   }
 
   // Rename placed object function
-  function renamePlacedObject(index) {
+  function renamePlacedObject(index, id) {
     const currentName = filteredSpawnedObjectsCache[index]?.displayName ||
       filteredSpawnedObjectsCache[index]?.model || 'Unknown';
 
-    showRenameModal(index, currentName);
+    showRenameModal(index, id, currentName);
   }
 
-  function showRenameModal(index, currentName) {
+  function showRenameModal(index, id, currentName) {
     const title = '🏷️ Rename Object';
     const message = `Enter a new name for this object:`;
     const details = `
@@ -2251,7 +2779,7 @@ window.addEventListener("DOMContentLoaded", () => {
       title,
       message,
       details,
-      () => executeRename(index, currentName), // onConfirm
+      () => executeRename(index, id, currentName), // onConfirm
       () => { } // onCancel (do nothing)
     );
 
@@ -2265,14 +2793,14 @@ window.addEventListener("DOMContentLoaded", () => {
         // Allow Enter key to confirm
         input.addEventListener('keypress', (e) => {
           if (e.key === 'Enter') {
-            executeRename(index, currentName);
+            executeRename(index, id, currentName);
           }
         });
       }
     }, 100);
   }
 
-  function executeRename(index, originalName) {
+  function executeRename(index, id, originalName) {
     const input = document.getElementById('renameInput');
     const newName = input ? input.value.trim() : '';
 
@@ -2290,7 +2818,7 @@ window.addEventListener("DOMContentLoaded", () => {
     fetch('https://bazq-os/renameObject', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ index: parseInt(index), newName: newName })
+      body: JSON.stringify({ index: parseInt(index), id: id || undefined, newName: newName })
     }).then(response => {
       if (response.ok) {
         // Update local cache
@@ -3036,6 +3564,7 @@ window.addEventListener("DOMContentLoaded", () => {
     if (!timeDisplay) timeDisplay = '--/--/---- --:--';
 
 
+    objectItem.dataset.id = obj.id || '';
     objectItem.innerHTML = `
       <div class="grid-object-icon">${icon}</div>
       <div class="grid-object-info">
@@ -3046,16 +3575,16 @@ window.addEventListener("DOMContentLoaded", () => {
         </div>
       </div>
       <div class="grid-object-actions">
-        <button class="grid-action-btn rename-btn" data-index="${obj.originalIndex}" title="Rename">
+        <button class="grid-action-btn rename-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Rename">
           <i class="fas fa-tag"></i>
         </button>
-        <button class="grid-action-btn edit-btn" data-index="${obj.originalIndex}" title="Edit">
+        <button class="grid-action-btn edit-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Edit">
           <i class="fas fa-edit"></i>
         </button>
-        <button class="grid-action-btn duplicate-btn" data-index="${obj.originalIndex}" title="Duplicate">
+        <button class="grid-action-btn duplicate-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Duplicate">
           <i class="fas fa-copy"></i>
         </button>
-        <button class="grid-action-btn delete-btn" data-index="${obj.originalIndex}" title="Delete">
+        <button class="grid-action-btn delete-btn" data-index="${obj.originalIndex}" data-id="${obj.id || ''}" title="Delete">
           <i class="fas fa-trash"></i>
         </button>
       </div>
@@ -3071,7 +3600,7 @@ window.addEventListener("DOMContentLoaded", () => {
     // Click handler for object selection
     objectItem.addEventListener('click', (e) => {
       if (!e.target.closest('.grid-object-actions')) {
-        selectObject(obj.originalIndex);
+        selectObject(obj.originalIndex, obj.id);
       }
     });
 
@@ -3084,28 +3613,28 @@ window.addEventListener("DOMContentLoaded", () => {
     if (renameBtn) {
       renameBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        renamePlacedObject(obj.originalIndex);
+        renamePlacedObject(obj.originalIndex, obj.id);
       });
     }
 
     if (editBtn) {
       editBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        editPlacedObject(obj.originalIndex);
+        editPlacedObject(obj.originalIndex, obj.id);
       });
     }
 
     if (duplicateBtn) {
       duplicateBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        duplicatePlacedObject(obj.originalIndex);
+        duplicatePlacedObject(obj.originalIndex, obj.id);
       });
     }
 
     if (deleteBtn) {
       deleteBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        deletePlacedObject(obj.originalIndex);
+        deletePlacedObject(obj.originalIndex, obj.id);
       });
     }
   }
@@ -3188,41 +3717,44 @@ window.addEventListener("DOMContentLoaded", () => {
     // Show progress
     addLogEntry(`Deleting ${objects.length} objects from group "${groupTitle}"...`, 'info');
 
-    // Delete all objects in the group
-    let deletedCount = 0;
-    const deletePromises = objects.map(obj => {
-      return fetch('https://bazq-os/deleteObject', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ index: parseInt(obj.originalIndex) })
-      }).then(() => {
-        deletedCount++;
-      }).catch(error => {
-        console.error(`Failed to delete object ${obj.originalIndex}:`, error);
+    const indices = objects.map(obj => parseInt(obj.originalIndex));
+    const ids = objects.map(obj => obj.id).filter(id => id && id.length > 0);
+
+    fetch('https://bazq-os/deleteObjects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ indices: indices, ids: ids })
+    })
+      .then(response => response.json())
+      .then(data => {
+        if (data.status === 'ok') {
+          const deletedCount = data.deletedCount || indices.length;
+          addLogEntry(`✅ Deleted ${deletedCount}/${objects.length} objects from group "${groupTitle}"`, 'success');
+
+          // Remove deleted objects from local cache
+          if (localSpawnedObjectsCache) {
+            localSpawnedObjectsCache = localSpawnedObjectsCache.filter(obj =>
+              !indices.includes(parseInt(obj.originalIndex))
+            );
+          }
+          if (filteredSpawnedObjectsCache) {
+            filteredSpawnedObjectsCache = filteredSpawnedObjectsCache.filter(obj =>
+              !indices.includes(parseInt(obj.originalIndex))
+            );
+          }
+
+          // Refresh the view with updated cache
+          setTimeout(() => {
+            applyMultiLevelGrouping();
+          }, 100);
+        } else {
+          addLogEntry(`❌ Failed to delete group: ${data.message || 'Unknown error'}`, 'error');
+        }
+      })
+      .catch(error => {
+        console.error('Failed to delete group:', error);
+        addLogEntry(`❌ Failed to delete group due to network error`, 'error');
       });
-    });
-
-    Promise.all(deletePromises).then(() => {
-      addLogEntry(`✅ Deleted ${deletedCount}/${objects.length} objects from group "${groupTitle}"`, 'success');
-
-      // Remove deleted objects from local cache
-      const deletedIndices = objects.map(obj => parseInt(obj.originalIndex));
-      if (localSpawnedObjectsCache) {
-        localSpawnedObjectsCache = localSpawnedObjectsCache.filter(obj =>
-          !deletedIndices.includes(parseInt(obj.originalIndex))
-        );
-      }
-      if (filteredSpawnedObjectsCache) {
-        filteredSpawnedObjectsCache = filteredSpawnedObjectsCache.filter(obj =>
-          !deletedIndices.includes(parseInt(obj.originalIndex))
-        );
-      }
-
-      // Refresh the view with updated cache
-      setTimeout(() => {
-        applyMultiLevelGrouping();
-      }, 100);
-    });
   }
 
 }); // End of DOMContentLoaded 

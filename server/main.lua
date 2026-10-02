@@ -115,6 +115,34 @@ local function SaveOsAdminToFile()
     end
 end
 
+-- ============================================
+-- AUTHORITATIVE SERVER-SIDE OBJECT ID GENERATOR
+-- ============================================
+local function GenerateRandomToken(len)
+    local chars = "0123456789abcdef"
+    local t = {}
+    for i = 1, len do
+        local r = math.random(1, #chars)
+        t[i] = string.sub(chars, r, r)
+    end
+    return table.concat(t)
+end
+
+local function GenerateObjectId()
+    -- Format: obj_<timestamp_hex>_<random_16_hex> (opaque, collision-resistant token)
+    return string.format("obj_%08x_%s", os.time(), GenerateRandomToken(16))
+end
+
+local function GenerateUniqueObjectId(knownIds)
+    local newId = GenerateObjectId()
+    local attempts = 0
+    while knownIds and knownIds[newId] and attempts < 100 do
+        newId = GenerateObjectId()
+        attempts = attempts + 1
+    end
+    return newId
+end
+
 -- Save objects to JSON file
 local function SaveObjectsToFile()
     DebugSave("SaveObjectsToFile() called with " .. #savedObjects .. " objects")
@@ -123,8 +151,8 @@ local function SaveObjectsToFile()
     if #savedObjects > 0 then
         for i = 1, math.min(3, #savedObjects) do
             local obj = savedObjects[i]
-            DebugSave(string.format("Object %d: %s at %.2f,%.2f,%.2f", 
-                i, obj.model or "nil", 
+            DebugSave(string.format("Object %d: ID=%s, Model=%s at %.2f,%.2f,%.2f", 
+                i, obj.id or "nil", obj.model or "nil", 
                 obj.coords and obj.coords.x or 0, 
                 obj.coords and obj.coords.y or 0, 
                 obj.coords and obj.coords.z or 0))
@@ -159,6 +187,59 @@ local function SaveObjectsToFile()
     end
 end
 
+-- Backward-compatible persistent ID migration
+local function MigrateObjectIds()
+    if type(savedObjects) ~= "table" then return end
+    
+    local knownIds = {}
+    local migratedCount = 0
+    local repairedCount = 0
+    local totalCount = #savedObjects
+    
+    -- Pass 1: Index existing valid IDs
+    for _, obj in ipairs(savedObjects) do
+        if type(obj) == "table" and type(obj.id) == "string" and obj.id ~= "" then
+            if not knownIds[obj.id] then
+                knownIds[obj.id] = true
+            end
+        end
+    end
+    
+    -- Pass 2: Repair duplicate IDs and assign missing IDs
+    local seenInPass = {}
+    for i, obj in ipairs(savedObjects) do
+        if type(obj) == "table" then
+            if type(obj.id) == "string" and obj.id ~= "" then
+                if seenInPass[obj.id] then
+                    local oldId = obj.id
+                    local newId = GenerateUniqueObjectId(knownIds)
+                    obj.id = newId
+                    knownIds[newId] = true
+                    seenInPass[newId] = true
+                    repairedCount = repairedCount + 1
+                    dbg(string.format("Duplicate object ID '%s' at index %d repaired to '%s'", oldId, i, newId))
+                else
+                    seenInPass[obj.id] = true
+                end
+            else
+                local newId = GenerateUniqueObjectId(knownIds)
+                obj.id = newId
+                knownIds[newId] = true
+                seenInPass[newId] = true
+                migratedCount = migratedCount + 1
+            end
+        end
+    end
+    
+    print(string.format("^4[bazq-os] ^7Object ID migration: %d existing, %d migrated, %d duplicate IDs repaired.", 
+        totalCount, migratedCount, repairedCount))
+    
+    -- Persist immediately if any IDs were added or repaired
+    if migratedCount > 0 or repairedCount > 0 then
+        SaveObjectsToFile()
+    end
+end
+
 -- Load objects from JSON file (on server start)
 local function LoadObjectsFromFile()
     local fileContent = LoadResourceFile(GetCurrentResourceName(), "saved_objects.json")
@@ -166,6 +247,8 @@ local function LoadObjectsFromFile()
         local success, decodedObjects = pcall(json.decode, fileContent)
         if success and type(decodedObjects) == "table" then
             savedObjects = decodedObjects
+            -- Perform Phase 2 persistent ID migration
+            MigrateObjectIds()
         else
             OPLog("[ObjectPlacer] SERVER ERROR: Failed to decode saved_objects.json or it's not a table. Content: " .. tostring(fileContent))
             savedObjects = {}
@@ -284,14 +367,21 @@ AddEventHandler('playerDropped', function(reason)
         
         dbg(string.format("🧹 TestZone cleanup: Removing %d objects from %s", #objectsToDelete, playerName))
         
-        -- Remove objects from savedObjects
+        -- Remove objects from savedObjects by persistent ID (with coordinate fallback)
         for i = #savedObjects, 1, -1 do
             local obj = savedObjects[i]
             for _, playerObj in ipairs(objectsToDelete) do
-                if obj.coords and playerObj.coords and 
+                local matched = false
+                if obj.id and playerObj.id and obj.id == playerObj.id then
+                    matched = true
+                elseif obj.coords and playerObj.coords and 
                    math.abs(obj.coords.x - playerObj.coords.x) < 0.1 and
                    math.abs(obj.coords.y - playerObj.coords.y) < 0.1 and
                    math.abs(obj.coords.z - playerObj.coords.z) < 0.1 then
+                    matched = true
+                end
+                
+                if matched then
                     table.remove(savedObjects, i)
                     deletedCount = deletedCount + 1
                     break
@@ -307,6 +397,7 @@ AddEventHandler('playerDropped', function(reason)
             
             -- Notify all clients to update their lists
             TriggerClientEvent('bazq-objectplace:objectsUpdated', -1, savedObjects)
+            TriggerClientEvent('bazq-objectplace:loadObjects', -1, savedObjects)
         end
     end
     
@@ -1038,20 +1129,62 @@ AddEventHandler("bazq-objectplace:saveObjects", function(objectsDataFromClient)
             DebugSave("  - Player: " .. tostring(firstItem.playerName))
         end
 
+        -- Validate and assign authoritative IDs to incoming objects
+        local validatedObjects = {}
+        local knownIds = {}
+        local idListForClient = {}
+        local newAssigned = 0
+        
+        -- Register all existing IDs first to avoid collisions
+        for _, existingObj in ipairs(savedObjects) do
+            if type(existingObj) == "table" and type(existingObj.id) == "string" and existingObj.id ~= "" then
+                knownIds[existingObj.id] = true
+            end
+        end
+        
+        local seenInBatch = {}
+        for i, obj in ipairs(objectsDataFromClient) do
+            if type(obj) == "table" and obj.model and obj.coords then
+                local assignedId = nil
+                -- If client sent an existing ID that is not duplicated in this batch
+                if type(obj.id) == "string" and obj.id ~= "" and not seenInBatch[obj.id] then
+                    assignedId = obj.id
+                    seenInBatch[assignedId] = true
+                    knownIds[assignedId] = true
+                else
+                    -- Brand new object (placed, duplicated, etc.) or duplicate ID: generate authoritative server ID
+                    assignedId = GenerateUniqueObjectId(knownIds)
+                    knownIds[assignedId] = true
+                    seenInBatch[assignedId] = true
+                    newAssigned = newAssigned + 1
+                end
+                
+                obj.id = assignedId
+                table.insert(idListForClient, assignedId)
+                table.insert(validatedObjects, obj)
+            end
+        end
+
         -- Update savedObjects and save to file
-        savedObjects = objectsDataFromClient
+        savedObjects = validatedObjects
+        
         -- Track for disconnect cleanup in test zone flow (only objects belonging to this player)
         local mine = {}
-        for _, obj in ipairs(objectsDataFromClient) do
+        for _, obj in ipairs(validatedObjects) do
             if obj.playerName == playerName then
                 table.insert(mine, obj)
             end
         end
         TrackPlayerObjects(src, mine)
+        
         DebugSave("Updated savedObjects array, now calling SaveObjectsToFile()")
         SaveObjectsToFile()
         
-        OPLog("[ObjectPlacer] SERVER: Successfully processed save request for " .. #objectsDataFromClient .. " objects from " .. playerName)
+        OPLog(string.format("[ObjectPlacer] SERVER: Successfully processed save request for %d objects (%d new IDs assigned) from %s", 
+            #validatedObjects, newAssigned, playerName))
+            
+        -- Sync authoritative IDs back to the saving client
+        TriggerClientEvent("bazq-objectplace:syncObjectIds", src, idListForClient)
         
         -- Broadcast updated list to all other clients for real-time sync
         for _, player in ipairs(GetPlayers()) do

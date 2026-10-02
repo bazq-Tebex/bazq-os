@@ -170,6 +170,36 @@ local function GetObjectIndexFromEntity(entity)
     return nil
 end
 
+local function GetObjectByEntity(entity)
+    for i, obj in ipairs(spawnedObjects) do
+        if obj.entity == entity then
+            return obj, i
+        end
+    end
+    return nil, nil
+end
+
+local function GetObjectById(id)
+    if not id or id == "" then return nil, nil end
+    for i, obj in ipairs(spawnedObjects) do
+        if obj.id == id then
+            return obj, i
+        end
+    end
+    return nil, nil
+end
+
+local function GetSpawnedObjectByIdOrIndex(id, index)
+    if id and id ~= "" then
+        local obj, i = GetObjectById(id)
+        if obj then return obj, i end
+    end
+    if index and spawnedObjects[index] then
+        return spawnedObjects[index], index
+    end
+    return nil, nil
+end
+
 local function StartTargetEdit(index)
     if not HasSpawnPermissions() then
         SetNotificationTextEntry("STRING")
@@ -184,9 +214,10 @@ local function StartTargetEdit(index)
         ClearAllHighlights()
         
         editingObjectData = {
+            id = objData.id,
             entity = objData.entity, originalIndex = index, model = objData.model,
             originalCoords = GetEntityCoords(objData.entity), originalHeading = GetEntityHeading(objData.entity),
-            timestamp = objData.timestamp
+            timestamp = objData.timestamp, playerName = objData.playerName
         }
         
         SetEntityAlpha(objData.entity, 180, false)
@@ -234,6 +265,7 @@ local function StartTargetDuplicate(index)
                 local rot = GetEntityRotation(newEntity, 2)
                 local newIndex = #spawnedObjects + 1
                 spawnedObjects[newIndex] = {
+                    id = nil, -- Explicitly nil: duplicated objects MUST receive fresh server-generated IDs
                     entity = newEntity,
                     model = objData.model,
                     coords = GetEntityCoords(newEntity),
@@ -261,6 +293,7 @@ local function StartTargetDuplicate(index)
                 isMenuOpen = false
                 
                 editingObjectData = {
+                    id = nil,
                     entity = newEntity, 
                     originalIndex = newIndex, 
                     model = objData.model,
@@ -293,7 +326,8 @@ local function StartTargetDelete(index)
     if highlightedObjectIndex == index then
         ClearAllHighlights()
     end
-    DeleteSpawnedObject(index)
+    local objData = spawnedObjects[index]
+    DeleteSpawnedObject(index, objData and objData.id)
 end
 
 local ConvertToGate
@@ -440,6 +474,7 @@ ConvertToGate = function(entity)
     local objData = spawnedObjects[idx]
     if not objData then return end
     
+    local originalId = objData.id
     local model = objData.model
     local coords = objData.coords
     local heading = objData.heading
@@ -582,6 +617,7 @@ ConvertToGate = function(entity)
         local rot = GetEntityRotation(gateObj, 2)
         local newIndex = #spawnedObjects + 1
         spawnedObjects[newIndex] = {
+            id = originalId, -- Preserves logical placed object identity across gate transformation
             entity = gateObj,
             model = targetGateModel,
             coords = GetEntityCoords(gateObj),
@@ -903,6 +939,7 @@ function GetSerializableSpawnedObjects()
             
             local pkg = GetObjectPackageName(objData.model)
             table.insert(list, {
+                id = objData.id,
                 model = objData.model,
                 originalIndex = i,
                 timestamp = objData.timestamp or "",
@@ -984,23 +1021,23 @@ RegisterNUICallback('selectObject', function(data, cb)
         cb({status = 'error'}); return
     end
     
-    -- Handle object selection for highlighting (data.index)
-    if data.index then
-        local index = tonumber(data.index)
-        if index and spawnedObjects[index] then
+    -- Handle object selection for highlighting (data.id or data.index)
+    if data.id or data.index then
+        local obj, index = GetSpawnedObjectByIdOrIndex(data.id, tonumber(data.index))
+        if obj and index then
             -- Clear previous highlight
             ClearAllHighlights()
             
             -- Highlight new object
             if HighlightObject(index) then
                 highlightedObjectIndex = index
-                DebugLog("GENERAL", "Selected object " .. index .. " (" .. (spawnedObjects[index].model or "unknown") .. ") for highlighting")
+                DebugLog("GENERAL", "Selected object " .. tostring(obj.id or index) .. " (" .. (obj.model or "unknown") .. ") for highlighting")
                 cb({status = 'ok', message = 'Object selected and highlighted'})
             else
                 cb({status = 'error', message = 'Failed to highlight object'})
             end
         else
-            cb({status = 'error', message = 'Invalid object index'})
+            cb({status = 'error', message = 'Invalid object identifier'})
         end
         return
     end
@@ -1067,37 +1104,52 @@ RegisterNUICallback('cancelPlacement', function(_, cb)
 end)
 
 RegisterNUICallback('deleteObject', function(data, cb)
-    local index = tonumber(data.index)
-    if index and spawnedObjects[index] then
+    local obj, index = GetSpawnedObjectByIdOrIndex(data.id, tonumber(data.index))
+    if obj and index then
         -- Clear highlight if this is the highlighted object
         if highlightedObjectIndex == index then
             ClearAllHighlights()
         end
-        DeleteSpawnedObject(index)
+        DeleteSpawnedObject(index, obj.id)
         cb({status = 'ok'})
     else
-        cb({status = 'error', message = 'Invalid index for deletion.'})
+        cb({status = 'error', message = 'Invalid identifier for deletion.'})
     end
 end)
 
 RegisterNUICallback('deleteObjects', function(data, cb)
     local indices = data.indices
-    if not indices or type(indices) ~= 'table' or #indices == 0 then
-        cb({status = 'error', message = 'No indices provided.'})
-        return
-    end
-
-    -- Convert strings to numbers and filter valid ones
+    local ids = data.ids
+    
     local validIndices = {}
-    for _, idx in ipairs(indices) do
-        local n = tonumber(idx)
-        if n and spawnedObjects[n] then
-            table.insert(validIndices, n)
+    local seenIndices = {}
+    
+    -- If persistent IDs are provided, resolve indexes by ID first
+    if type(ids) == 'table' and #ids > 0 then
+        for _, id in ipairs(ids) do
+            if type(id) == 'string' and id ~= '' then
+                local _, idx = GetObjectById(id)
+                if idx and not seenIndices[idx] then
+                    seenIndices[idx] = true
+                    table.insert(validIndices, idx)
+                end
+            end
+        end
+    end
+    
+    -- Fallback/supplement with provided indices
+    if type(indices) == 'table' and #indices > 0 then
+        for _, idx in ipairs(indices) do
+            local n = tonumber(idx)
+            if n and spawnedObjects[n] and not seenIndices[n] then
+                seenIndices[n] = true
+                table.insert(validIndices, n)
+            end
         end
     end
 
     if #validIndices == 0 then
-        cb({status = 'error', message = 'No valid indices for deletion.'})
+        cb({status = 'error', message = 'No valid objects for deletion.'})
         return
     end
 
@@ -1153,10 +1205,9 @@ RegisterNUICallback('duplicateObject', function(data, cb)
         SendNUIMessage({action = 'showError', message = "Finish keyboard editing first (Enter/Esc)."})
         cb({status = 'error'}); return
     end
-    local index = tonumber(data.index)
-    if index and spawnedObjects[index] then
-        local objData = spawnedObjects[index]
-        if objData and objData.model and objData.entity and DoesEntityExist(objData.entity) then
+    local objData, index = GetSpawnedObjectByIdOrIndex(data.id, tonumber(data.index))
+    if objData and index then
+        if objData.model and objData.entity and DoesEntityExist(objData.entity) then
             -- Get the original object's position and rotation
             local originalCoords = GetEntityCoords(objData.entity)
             local originalHeading = GetEntityHeading(objData.entity)
@@ -1183,9 +1234,10 @@ RegisterNUICallback('duplicateObject', function(data, cb)
                     PlaceObjectOnGroundProperly(newEntity)
                     FreezeEntityPosition(newEntity, true)
                     
-                    -- Add to spawned objects list
+                    -- Add to spawned objects list WITHOUT copying source ID
                     local newIndex = #spawnedObjects + 1
                     spawnedObjects[newIndex] = {
+                        id = nil, -- Must be nil so server assigns a fresh authoritative ID
                         entity = newEntity,
                         model = objData.model,
                         coords = GetEntityCoords(newEntity),
@@ -1213,6 +1265,7 @@ RegisterNUICallback('duplicateObject', function(data, cb)
                     isMenuOpen = false
                     
                     editingObjectData = {
+                        id = nil,
                         entity = newEntity, 
                         originalIndex = newIndex, 
                         model = objData.model,
@@ -1245,7 +1298,7 @@ RegisterNUICallback('duplicateObject', function(data, cb)
             cb({status = 'error', message = 'Object data or entity missing.'})
         end
     else
-        cb({status = 'error', message = 'Invalid index for duplication.'})
+        cb({status = 'error', message = 'Invalid identifier for duplication.'})
     end
 end)
 
@@ -1256,14 +1309,14 @@ RegisterNUICallback('editObject', function(data, cb)
         SendNUIMessage({action = 'showError', message = "Finish keyboard editing first (Enter/Esc)."})
         cb({status = 'error'}); return
     end
-    local index = tonumber(data.index)
-    if index and spawnedObjects[index] then
-        local objData = spawnedObjects[index]
+    local objData, index = GetSpawnedObjectByIdOrIndex(data.id, tonumber(data.index))
+    if objData and index then
         if objData and objData.entity and DoesEntityExist(objData.entity) then
             -- Clear any selection highlighting before starting edit
             ClearAllHighlights()
             
             editingObjectData = {
+                id = objData.id,
                 entity = objData.entity, originalIndex = index, model = objData.model,
                 originalCoords = GetEntityCoords(objData.entity), originalHeading = GetEntityHeading(objData.entity),
                 timestamp = objData.timestamp, playerName = objData.playerName
@@ -1283,7 +1336,7 @@ RegisterNUICallback('editObject', function(data, cb)
             cb({status = 'error', message = 'Object entity missing.'}) 
         end
     else 
-        cb({status = 'error', message = 'Invalid index for editing.'}) 
+        cb({status = 'error', message = 'Invalid identifier for editing.'}) 
     end
 end)
 
@@ -1478,17 +1531,17 @@ RegisterNUICallback('editSpawnedObject', function(data, cb)
         SendNUIMessage({action = 'showError', message = "Already editing. Press Enter/Esc."})
         cb({status = 'error'}); return
     end
-    local index = tonumber(data.index)
-    if index and spawnedObjects[index] then
-        local objData = spawnedObjects[index]
+    local objData, index = GetSpawnedObjectByIdOrIndex(data.id, tonumber(data.index))
+    if objData and index then
         if objData and objData.entity and DoesEntityExist(objData.entity) then
             -- Clear any selection highlighting before starting edit
             ClearAllHighlights()
             
             editingObjectData = {
+                id = objData.id,
                 entity = objData.entity, originalIndex = index, model = objData.model,
                 originalCoords = GetEntityCoords(objData.entity), originalHeading = GetEntityHeading(objData.entity),
-                timestamp = objData.timestamp
+                timestamp = objData.timestamp, playerName = objData.playerName
             }
             
             -- Apply green glowing wireframe effect immediately when starting edit
@@ -1502,7 +1555,7 @@ RegisterNUICallback('editSpawnedObject', function(data, cb)
             Citizen.CreateThread(KeyboardEditLoop)
             cb({status = 'ok'})
         else cb({status = 'error', message = 'Object entity missing.'}) end
-    else cb({status = 'error', message = 'Invalid index for editing.'}) end
+    else cb({status = 'error', message = 'Invalid identifier for editing.'}) end
 end)
 
 local menuOpenKey = 168 -- F7 Key
@@ -2645,16 +2698,25 @@ function ApplyKeyboardEdit()
         SetEntityDrawOutline(ent, false)
         SetEntityRenderScorched(ent, false)
         
-        -- Safe array lookup fallback
-        local targetIndex = editingObjectData.originalIndex
-        local objData = spawnedObjects[targetIndex]
+        -- Identity resolution: match by persistent ID first, falling back to originalIndex/fuzzy match
+        local targetIndex = nil
+        local objData = nil
         
-        if not objData or objData.timestamp ~= editingObjectData.timestamp or objData.playerName ~= editingObjectData.playerName then
-            for i, obj in ipairs(spawnedObjects) do
-                if obj.timestamp == editingObjectData.timestamp and obj.playerName == editingObjectData.playerName and obj.model == editingObjectData.model then
-                    targetIndex = i
-                    objData = obj
-                    break
+        if editingObjectData.id and editingObjectData.id ~= "" then
+            objData, targetIndex = GetObjectById(editingObjectData.id)
+        end
+        
+        if not objData then
+            targetIndex = editingObjectData.originalIndex
+            objData = spawnedObjects[targetIndex]
+            
+            if not objData or (editingObjectData.id and objData.id ~= editingObjectData.id) or objData.timestamp ~= editingObjectData.timestamp or objData.playerName ~= editingObjectData.playerName then
+                for i, obj in ipairs(spawnedObjects) do
+                    if (editingObjectData.id and obj.id == editingObjectData.id) or (obj.timestamp == editingObjectData.timestamp and obj.playerName == editingObjectData.playerName and obj.model == editingObjectData.model) then
+                        targetIndex = i
+                        objData = obj
+                        break
+                    end
                 end
             end
         end
@@ -2915,10 +2977,23 @@ function CleanupAssociatedDoors(parentObjData)
     end
 end
 
-function DeleteSpawnedObject(index)
-    local objData=spawnedObjects[index]
-    if objData then
-        DebugDeletion("Deleting object at index " .. index .. ", model: " .. (objData.model or "unknown"))
+function DeleteSpawnedObject(identifier, fallbackId)
+    local index = nil
+    local objData = nil
+    
+    if type(identifier) == "string" and identifier ~= "" then
+        objData, index = GetObjectById(identifier)
+    elseif fallbackId and type(fallbackId) == "string" and fallbackId ~= "" then
+        objData, index = GetObjectById(fallbackId)
+    end
+    
+    if not objData and type(identifier) == "number" then
+        index = identifier
+        objData = spawnedObjects[index]
+    end
+
+    if objData and index then
+        DebugDeletion("Deleting object " .. tostring(objData.id or "no-id") .. " at index " .. index .. ", model: " .. (objData.model or "unknown"))
         DebugDeletion("hasDualDoors: " .. tostring(objData.hasDualDoors))
         DebugDeletion("interiorEntity type: " .. type(objData.interiorEntity))
         
@@ -2969,7 +3044,7 @@ function DeleteSpawnedObject(index)
         SendNUIMessage({action="updateSpawnedList",data=GetSerializableSpawnedObjects()})
         DebugDeletion("Deletion complete")
     else
-        DebugDeletion("ERROR: No object data found at index " .. index)
+        DebugDeletion("ERROR: No object data found for identifier " .. tostring(identifier or fallbackId))
     end
 end
 
@@ -3134,9 +3209,10 @@ function SaveObjectsToServer()
                 rot = { x = r.x, y = r.y, z = r.z }
             end
             
-            DebugLog("SAVE", string.format("Item %d: Model=%s, X=%.2f, Y=%.2f, Z=%.2f, H=%.2f, TS=%s, Player=%s",
-                i, objData.model, objData.coords.x, objData.coords.y, objData.coords.z, objData.heading, objData.timestamp or "N/A", objData.playerName or "Unknown"))
+            DebugLog("SAVE", string.format("Item %d: ID=%s, Model=%s, X=%.2f, Y=%.2f, Z=%.2f, H=%.2f, TS=%s, Player=%s",
+                i, tostring(objData.id or "NEW"), objData.model, objData.coords.x, objData.coords.y, objData.coords.z, objData.heading, objData.timestamp or "N/A", objData.playerName or "Unknown"))
             local saveData = {
+                id=objData.id,
                 model=objData.model,
                 coords=objData.coords,
                 heading=objData.heading,
@@ -3241,6 +3317,7 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                     local lockedCoords = vector3(objSD.coords.x, objSD.coords.y, objSD.coords.z)
                     
                     local objectData = {
+                        id=objSD.id,
                         entity=ent,
                         model=objSD.model,
                         coords=lockedCoords,
@@ -3398,6 +3475,21 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
     -- Update UI after loading
     SendNUIMessage({action="updateSpawnedList",data=GetSerializableSpawnedObjects()})
     DebugLog("LOADING", "Finished loading. Spawned objects count: "..#spawnedObjects)
+end)
+
+-- Receive authoritative IDs from server after save
+RegisterNetEvent("bazq-objectplace:syncObjectIds")
+AddEventHandler("bazq-objectplace:syncObjectIds", function(idList)
+    if type(idList) ~= "table" then return end
+    for i, id in ipairs(idList) do
+        if spawnedObjects[i] then
+            spawnedObjects[i].id = id
+        end
+    end
+    SendNUIMessage({
+        action = "updateSpawnedList",
+        data = GetSerializableSpawnedObjects()
+    })
 end)
 -- Commands removed - only F7 key access for admins
 
@@ -4502,20 +4594,14 @@ end)
 
 -- Handle object renaming from UI
 RegisterNUICallback('renameObject', function(data, cb)
-    local index = data.index
+    local obj, index = GetSpawnedObjectByIdOrIndex(data.id, tonumber(data.index))
     local newName = data.newName
     
-    if index and spawnedObjects[index] and newName and newName ~= "" then
-        -- Update the display name
+    if obj and index and newName and newName ~= "" then
         spawnedObjects[index].displayName = newName
-        
-        -- Save to server
         SaveObjectsToServer()
-        
-        -- Update UI list
         SendNUIMessage({action="updateSpawnedList", data=GetSerializableSpawnedObjects()})
-        
-        DebugLog("USER", "Renamed object at index " .. index .. " to: " .. newName)
+        DebugLog("USER", "Renamed object " .. tostring(obj.id or index) .. " to: " .. newName)
         cb({status = 'ok'})
     else
         cb({status = 'error', message = 'Invalid rename data'})
@@ -4675,7 +4761,8 @@ CreateThread(function()
                 end
                 
                 if nearestObjectIndex then
-                    DeleteSpawnedObject(nearestObjectIndex)
+                    local objToDelete = spawnedObjects[nearestObjectIndex]
+                    DeleteSpawnedObject(nearestObjectIndex, objToDelete and objToDelete.id)
                     TriggerEvent('chat:addMessage', {
                         color = { 255, 255, 0 },
                         args = { "[TestZone]", "Obje silindi! Mesafe: " .. string.format("%.1f", nearestDistance) .. "m" }
@@ -4734,12 +4821,14 @@ CreateThread(function()
                     -- Start edit mode like in the original code
                     local objData = spawnedObjects[nearestObjectIndex]
                     editingObjectData = {
+                        id = objData.id,
                         entity = objData.entity, 
                         originalIndex = nearestObjectIndex, 
                         model = objData.model,
                         originalCoords = GetEntityCoords(objData.entity), 
                         originalHeading = GetEntityHeading(objData.entity),
-                        timestamp = objData.timestamp
+                        timestamp = objData.timestamp,
+                        playerName = objData.playerName
                     }
                     
                     -- Apply green glowing wireframe effect immediately when starting edit
@@ -5011,14 +5100,13 @@ RegisterCommand('debugf7', function()
 end, false)
 
 RegisterNUICallback('teleportToObject', function(data, cb)
-    local index = tonumber(data.index)
-    if not index or not spawnedObjects[index] then
-        DebugLog("NUI", "Teleport failed: Invalid index " .. tostring(index))
+    local objData, index = GetSpawnedObjectByIdOrIndex(data.id, tonumber(data.index))
+    if not objData or not index then
+        DebugLog("NUI", "Teleport failed: Invalid object " .. tostring(data.id or data.index))
         cb('error')
         return
     end
 
-    local objData = spawnedObjects[index]
     local targetEntity = objData.entity
     local targetCoords = objData.coords
 
@@ -5049,7 +5137,7 @@ RegisterNUICallback('teleportToObject', function(data, cb)
         end
     end)
     
-    DebugLog("NUI", "Teleported to object index: " .. index)
+    DebugLog("NUI", "Teleported to object: " .. tostring(objData.id or index))
     cb('ok')
 end)
 
