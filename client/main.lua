@@ -59,16 +59,24 @@ local placing = false
 local selectedObject = nil
 local objectEntity = nil
 local editingObjectData = nil
+local pathDrawing = false
+local spawnedObjects = {}
+local currentPlacementOptions = {
+    snapToGround = true,
+    timestamp = "", -- Will be set from JS
+    playerName = "Unknown" -- Will be set from osadmin.json displayName
+}
 
 -- Global helper for Freecam to check if we are currently building
 function IsPlacementActive()
-    return placing or editingObjectData ~= nil
+    return placing or editingObjectData ~= nil or pathDrawing == true
 end
 local manualHeightAdjusted = false
 local objectsConfig = {}
 local isMenuOpen = false
 local isControlsDisabled = false
 local isFreecamActive = false
+local ToggleFreecam
 
 -- Real timestamp cache and function
 local lastTimestampUpdate = 0
@@ -140,17 +148,469 @@ local currentUserSettings = {}
 -- Safe load mode flag (set by server on resource start if players are online)
 local SAFE_LOAD_MODE = false
 
+-- ================================
+-- TARGET SYSTEM INTEGRATION
+-- ================================
+
+local function HasSpawnPermissions()
+    if not currentUserSettings or not currentUserSettings.role then
+        -- Fallback to check if we can open F7 at all (guest has no permissions)
+        return false
+    end
+    local role = currentUserSettings.role
+    return role == "owner" or role == "admin" or role == "mapper"
+end
+
+local function GetObjectIndexFromEntity(entity)
+    for i, obj in ipairs(spawnedObjects) do
+        if obj.entity == entity then
+            return i
+        end
+    end
+    return nil
+end
+
+local function StartTargetEdit(index)
+    if not HasSpawnPermissions() then
+        SetNotificationTextEntry("STRING")
+        AddTextComponentString("~r~Access Denied~w~\nYou do not have permissions to edit objects.")
+        DrawNotification(false, false)
+        return
+    end
+    if placing or editingObjectData then return end
+    
+    local objData = spawnedObjects[index]
+    if objData and objData.entity and DoesEntityExist(objData.entity) then
+        ClearAllHighlights()
+        
+        editingObjectData = {
+            entity = objData.entity, originalIndex = index, model = objData.model,
+            originalCoords = GetEntityCoords(objData.entity), originalHeading = GetEntityHeading(objData.entity),
+            timestamp = objData.timestamp
+        }
+        
+        SetEntityAlpha(objData.entity, 180, false)
+        SetEntityDrawOutline(objData.entity, true)
+        SetEntityDrawOutlineColor(104, 182, 91, 255)
+        SetEntityRenderScorched(objData.entity, true)
+        
+        SetNuiFocus(false, false)
+        SendNUIMessage({action = 'close'})
+        SendNUIMessage({action = 'editingModeUpdate', message = "EDIT MODE: WASD:Move | Alt/F:Height | Q/E:Rotate (1°) | G:Snap Toggle | X:Toggle 5° Mode | R:Reset Rotation | LMB:Save | RMB:Cancel | Rotation: " .. math.floor(GetEntityHeading(objData.entity)) .. "°", editingActive = true})
+        Citizen.CreateThread(KeyboardEditLoop)
+    end
+end
+
+local function StartTargetDuplicate(index)
+    if not HasSpawnPermissions() then
+        SetNotificationTextEntry("STRING")
+        AddTextComponentString("~r~Access Denied~w~\nYou do not have permissions to duplicate objects.")
+        DrawNotification(false, false)
+        return
+    end
+    if editingObjectData or placing then return end
+    
+    local objData = spawnedObjects[index]
+    if objData and objData.model and objData.entity and DoesEntityExist(objData.entity) then
+        local originalCoords = GetEntityCoords(objData.entity)
+        local originalHeading = GetEntityHeading(objData.entity)
+        
+        local playerName = currentPlacementOptions.playerName or "Unknown"
+        local timestamp = GetRealTimestamp()
+        
+        local modelHash = GetHashKey(objData.model)
+        if IsModelValid(modelHash) then
+            RequestModel(modelHash)
+            while not HasModelLoaded(modelHash) do
+                Citizen.Wait(10)
+            end
+            
+            local newEntity = CreateObject(modelHash, originalCoords.x, originalCoords.y, originalCoords.z, true, true, false)
+            if DoesEntityExist(newEntity) then
+                SetEntityHeading(newEntity, originalHeading)
+                PlaceObjectOnGroundProperly(newEntity)
+                FreezeEntityPosition(newEntity, true)
+                
+                local rot = GetEntityRotation(newEntity, 2)
+                local newIndex = #spawnedObjects + 1
+                spawnedObjects[newIndex] = {
+                    entity = newEntity,
+                    model = objData.model,
+                    coords = GetEntityCoords(newEntity),
+                    heading = GetEntityHeading(newEntity),
+                    rotation = {x = rot.x, y = rot.y, z = rot.z},
+                    playerName = playerName,
+                    timestamp = timestamp,
+                    originalIndex = newIndex
+                }
+                
+                -- Register target for the new entity
+                if typeof(RegisterTargetForEntity) == "function" or _G.RegisterTargetForEntity then
+                    RegisterTargetForEntity(newEntity)
+                end
+                
+                SaveObjectsToServer()
+                
+                SendNUIMessage({
+                    action = 'updateSpawnedList',
+                    data = GetSerializableSpawnedObjects()
+                })
+                
+                SetNuiFocus(false, false)
+                SendNUIMessage({action = 'close'})
+                isMenuOpen = false
+                
+                editingObjectData = {
+                    entity = newEntity, 
+                    originalIndex = newIndex, 
+                    model = objData.model,
+                    originalCoords = GetEntityCoords(newEntity), 
+                    originalHeading = GetEntityHeading(newEntity),
+                    timestamp = timestamp,
+                    playerName = playerName
+                }
+                
+                SetEntityAlpha(newEntity, 180, false)
+                SetEntityDrawOutline(newEntity, true)
+                SetEntityDrawOutlineColor(104, 182, 91, 255)
+                SetEntityRenderScorched(newEntity, true)
+                
+                SendNUIMessage({action = 'editingModeUpdate', message = "EDIT MODE: WASD:Move | Alt/F:Height | Q/E:Rotate (1°) | G:Snap Toggle | X:Toggle 5° Mode | R:Reset Rotation | LMB:Save | RMB:Cancel | Rotation: " .. math.floor(GetEntityHeading(newEntity)) .. "°", editingActive = true})
+                Citizen.CreateThread(KeyboardEditLoop)
+            end
+            SetModelAsNoLongerNeeded(modelHash)
+        end
+    end
+end
+
+local function StartTargetDelete(index)
+    if not HasSpawnPermissions() then
+        SetNotificationTextEntry("STRING")
+        AddTextComponentString("~r~Access Denied~w~\nYou do not have permissions to delete objects.")
+        DrawNotification(false, false)
+        return
+    end
+    if highlightedObjectIndex == index then
+        ClearAllHighlights()
+    end
+    DeleteSpawnedObject(index)
+end
+
+local ConvertToGate
+
+function RegisterTargetForEntity(entity)
+    if not entity or not DoesEntityExist(entity) then return end
+    
+    if GetResourceState('ox_target') == 'started' then
+        exports.ox_target:addLocalEntity(entity, {
+            {
+                name = 'bazq_os_edit',
+                icon = 'fas fa-edit',
+                label = 'Edit Object',
+                onSelect = function(data)
+                    local idx = GetObjectIndexFromEntity(data.entity)
+                    if idx then StartTargetEdit(idx) end
+                end
+            },
+            {
+                name = 'bazq_os_duplicate',
+                icon = 'fas fa-clone',
+                label = 'Duplicate Object',
+                onSelect = function(data)
+                    local idx = GetObjectIndexFromEntity(data.entity)
+                    if idx then StartTargetDuplicate(idx) end
+                end
+            },
+            {
+                name = 'bazq_os_converttogate',
+                icon = 'fas fa-door-open',
+                label = 'Convert to Gate (Kapı Yap)',
+                canInteract = function(entity, distance, coords, name, bone)
+                    local model = GetEntityModel(entity)
+                    local replaceable = {
+                        GetHashKey("bazq-sur1"), GetHashKey("bazq-sur2"), GetHashKey("bazq-sur3"), GetHashKey("bazq-sur4"), GetHashKey("bazq-sur5"),
+                        GetHashKey("bazq-wall2_wall1"), GetHashKey("bazq-wall2_wall2"), GetHashKey("bazq-wall2_wall3"), GetHashKey("bazq-wall2_wall4"), GetHashKey("bazq-wall2_wall5"),
+                        GetHashKey("bazq-wall3_wall1"), GetHashKey("bazq-wall3_wall2"), GetHashKey("bazq-wall3_wall3")
+                    }
+                    for _, h in ipairs(replaceable) do
+                        if model == h then return true end
+                    end
+                    return false
+                end,
+                onSelect = function(data)
+                    ConvertToGate(data.entity)
+                end
+            },
+            {
+                name = 'bazq_os_delete',
+                icon = 'fas fa-trash',
+                label = 'Delete Object',
+                onSelect = function(data)
+                    local idx = GetObjectIndexFromEntity(data.entity)
+                    if idx then StartTargetDelete(idx) end
+                end
+            }
+        })
+    elseif GetResourceState('qb-target') == 'started' then
+        exports['qb-target']:AddTargetEntity(entity, {
+            options = {
+                {
+                    type = "client",
+                    event = "bazq-os:targetEdit",
+                    icon = "fas fa-edit",
+                    label = "Edit Object",
+                },
+                {
+                    type = "client",
+                    event = "bazq-os:targetDuplicate",
+                    icon = "fas fa-clone",
+                    label = "Duplicate Object",
+                },
+                {
+                    type = "client",
+                    event = "bazq-os:targetConvertToGate",
+                    icon = "fas fa-door-open",
+                    label = "Convert to Gate (Kapı Yap)",
+                    canInteract = function(entity)
+                        local model = GetEntityModel(entity)
+                        local replaceable = {
+                            GetHashKey("bazq-sur1"), GetHashKey("bazq-sur2"), GetHashKey("bazq-sur3"), GetHashKey("bazq-sur4"), GetHashKey("bazq-sur5"),
+                            GetHashKey("bazq-wall2_wall1"), GetHashKey("bazq-wall2_wall2"), GetHashKey("bazq-wall2_wall3"), GetHashKey("bazq-wall2_wall4"), GetHashKey("bazq-wall2_wall5"),
+                            GetHashKey("bazq-wall3_wall1"), GetHashKey("bazq-wall3_wall2"), GetHashKey("bazq-wall3_wall3")
+                        }
+                        for _, h in ipairs(replaceable) do
+                            if model == h then return true end
+                        end
+                        return false
+                    end
+                },
+                {
+                    type = "client",
+                    event = "bazq-os:targetDelete",
+                    icon = "fas fa-trash",
+                    label = "Delete Object",
+                }
+            },
+            distance = 3.0
+        })
+    end
+end
+
+function UnregisterTargetForEntity(entity)
+    if not entity or not DoesEntityExist(entity) then return end
+    if GetResourceState('ox_target') == 'started' then
+        exports.ox_target:removeLocalEntity(entity)
+    elseif GetResourceState('qb-target') == 'started' then
+        exports['qb-target']:RemoveTargetEntity(entity)
+    end
+end
+
+-- Client events for qb-target compat
+RegisterNetEvent('bazq-os:targetEdit', function(data)
+    local entity = data and data.entity or nil
+    if not entity then return end
+    local idx = GetObjectIndexFromEntity(entity)
+    if idx then StartTargetEdit(idx) end
+end)
+
+RegisterNetEvent('bazq-os:targetDuplicate', function(data)
+    local entity = data and data.entity or nil
+    if not entity then return end
+    local idx = GetObjectIndexFromEntity(entity)
+    if idx then StartTargetDuplicate(idx) end
+end)
+
+RegisterNetEvent('bazq-os:targetDelete', function(data)
+    local entity = data and data.entity or nil
+    if not entity then return end
+    local idx = GetObjectIndexFromEntity(entity)
+    if idx then StartTargetDelete(idx) end
+end)
+
 RegisterNetEvent("bazq-objectplace:setSafeLoadMode")
 AddEventHandler("bazq-objectplace:setSafeLoadMode", function(state)
     SAFE_LOAD_MODE = state and true or false
     DebugLog("LOADING", "SafeLoadMode set to " .. tostring(SAFE_LOAD_MODE))
 end)
 
-local currentPlacementOptions = {
-    snapToGround = true,
-    timestamp = "", -- Will be set from JS
-    playerName = "Unknown" -- Will be set from osadmin.json displayName
-}
+ConvertToGate = function(entity)
+    local idx = GetObjectIndexFromEntity(entity)
+    if not idx then return end
+    
+    local objData = spawnedObjects[idx]
+    if not objData then return end
+    
+    local model = objData.model
+    local coords = objData.coords
+    local heading = objData.heading
+    
+    local isSurWall = false
+    local isWall2 = false
+    local isWall3 = false
+    
+    for i = 1, 5 do
+        if model == "bazq-sur" .. i then isSurWall = true end
+        if model == "bazq-wall2_wall" .. i then isWall2 = true end
+    end
+    for i = 1, 3 do
+        if model == "bazq-wall3_wall" .. i then isWall3 = true end
+    end
+    
+    if not isSurWall and not isWall2 and not isWall3 then
+        SendNUIMessage({action = 'log', message = 'Convert to Gate: Targeted object is not a replaceable wall.', type = 'error'})
+        return
+    end
+    
+    local targetGateModel = nil
+    if isSurWall then
+        targetGateModel = "bazq-sur_kapi"
+    elseif isWall2 then
+        targetGateModel = "bazq-wall2_gate1"
+    elseif isWall3 then
+        targetGateModel = "bazq-wall3_gateframe"
+    end
+    
+    if not targetGateModel then return end
+    
+    local gateHash = GetHashKey(targetGateModel)
+    RequestModel(gateHash)
+    local startTime = GetGameTimer()
+    while not HasModelLoaded(gateHash) do
+        if GetGameTimer() - startTime > 3000 then break end
+        Citizen.Wait(10)
+    end
+    
+    if not HasModelLoaded(gateHash) then
+        SendNUIMessage({action = 'log', message = 'Failed to load gate model.', type = 'error'})
+        return
+    end
+    
+    -- Delete targeted wall first
+    UnregisterTargetForEntity(entity)
+    SafeDeleteEntity(entity)
+    table.remove(spawnedObjects, idx)
+    
+    local spawnCoords = vector3(coords.x, coords.y, coords.z)
+    if isSurWall then
+        local foundNeighbourIdx = nil
+        local neighbourEntity = nil
+        for i, otherObj in ipairs(spawnedObjects) do
+            if otherObj.model and otherObj.model:match("bazq%-sur%d+") then
+                local dist = #(vector3(otherObj.coords.x, otherObj.coords.y, otherObj.coords.z) - spawnCoords)
+                if dist > 0.5 and dist <= 11.0 then
+                    foundNeighbourIdx = i
+                    neighbourEntity = otherObj.entity
+                    break
+                end
+            end
+        end
+        
+        if foundNeighbourIdx and neighbourEntity then
+            local nCoords = spawnedObjects[foundNeighbourIdx].coords
+            spawnCoords = vector3(
+                (coords.x + nCoords.x) / 2.0,
+                (coords.y + nCoords.y) / 2.0,
+                (coords.z + nCoords.z) / 2.0
+            )
+            UnregisterTargetForEntity(neighbourEntity)
+            SafeDeleteEntity(neighbourEntity)
+            table.remove(spawnedObjects, foundNeighbourIdx)
+        else
+            SendNUIMessage({action = 'log', message = 'Gate placed. Delete the adjacent wall manually to prevent overlap.', type = 'warning'})
+        end
+    end
+    
+    local gateObj = CreateObject(gateHash, spawnCoords.x, spawnCoords.y, spawnCoords.z, true, true, false)
+    if DoesEntityExist(gateObj) then
+        SetEntityAsMissionEntity(gateObj, true, true)
+        FreezeEntityPosition(gateObj, true)
+        SetEntityCollision(gateObj, true, true)
+        SetEntityHeading(gateObj, heading)
+        
+        local isDualDoors = false
+        local interiorEnt = nil
+        local interiorModelVal = nil
+        
+        if targetGateModel == "bazq-sur_kapi" then
+            local doorHash = GetHashKey("bazq-sur_mkapi")
+            RequestModel(doorHash)
+            local doorStartTime = GetGameTimer()
+            while not HasModelLoaded(doorHash) do
+                if GetGameTimer() - doorStartTime > 3000 then break end
+                Citizen.Wait(10)
+            end
+            
+            if HasModelLoaded(doorHash) then
+                local headingRad = math.rad(heading)
+                local forwardX = -math.sin(headingRad)
+                local forwardY = math.cos(headingRad)
+                
+                local door1Coords = vector3(
+                    spawnCoords.x + (5.37824 * forwardX),
+                    spawnCoords.y + (5.37824 * forwardY),
+                    spawnCoords.z
+                )
+                local door1Entity = CreateObject(doorHash, door1Coords.x, door1Coords.y, door1Coords.z, true, true, false)
+                if DoesEntityExist(door1Entity) then
+                    SetEntityHeading(door1Entity, heading + 90.0)
+                    SetEntityAsMissionEntity(door1Entity, true, true)
+                    SetEntityDynamic(door1Entity, true)
+                    SetEntityCollision(door1Entity, true, true)
+                end
+                
+                local door2Coords = vector3(
+                    spawnCoords.x - (5.37824 * forwardX),
+                    spawnCoords.y - (5.37824 * forwardY),
+                    spawnCoords.z
+                )
+                local door2Entity = CreateObject(doorHash, door2Coords.x, door2Coords.y, door2Coords.z, true, true, false)
+                if DoesEntityExist(door2Entity) then
+                    SetEntityHeading(door2Entity, heading - 90.0)
+                    SetEntityAsMissionEntity(door2Entity, true, true)
+                    SetEntityDynamic(door2Entity, true)
+                    SetEntityCollision(door2Entity, true, true)
+                end
+                
+                if DoesEntityExist(door1Entity) and DoesEntityExist(door2Entity) then
+                    interiorEnt = { door1Entity, door2Entity }
+                    interiorModelVal = "bazq-sur_mkapi"
+                    isDualDoors = true
+                end
+            end
+        end
+        
+        local rot = GetEntityRotation(gateObj, 2)
+        local newIndex = #spawnedObjects + 1
+        spawnedObjects[newIndex] = {
+            entity = gateObj,
+            model = targetGateModel,
+            coords = GetEntityCoords(gateObj),
+            heading = GetEntityHeading(gateObj),
+            rotation = {x = rot.x, y = rot.y, z = rot.z},
+            playerName = currentPlacementOptions.playerName or "Unknown",
+            timestamp = GetRealTimestamp(),
+            originalIndex = newIndex,
+            hasDualDoors = isDualDoors,
+            interiorEntity = interiorEnt,
+            interiorModel = interiorModelVal
+        }
+        RegisterTargetForEntity(gateObj)
+        
+        SaveObjectsToServer()
+        SendNUIMessage({action = "updateSpawnedList", data = GetSerializableSpawnedObjects()})
+        SendNUIMessage({action = 'log', message = 'Wall successfully converted to Gate!', type = 'success'})
+    end
+    
+    SetModelAsNoLongerNeeded(gateHash)
+end
+
+RegisterNetEvent("bazq-os:targetConvertToGate", function(data)
+    local entity = data.entity
+    if entity and DoesEntityExist(entity) then
+        ConvertToGate(entity)
+    end
+end)
+
 -- Master object lists by package
 local packageObjects = {
     tents_package = {
@@ -304,7 +764,6 @@ function GetUserObjects(userPackages)
 end
 
 local objectList = {} -- Will be populated based on user packages
-local spawnedObjects = {}
 
 -- Clean up highlights and spawned entities on resource stop
 AddEventHandler('onResourceStop', function(resourceName)
@@ -435,6 +894,13 @@ function GetSerializableSpawnedObjects()
                 local c = GetEntityCoords(objData.entity)
                 coords = { x = c.x, y = c.y, z = c.z }
             end
+            
+            local rot = objData.rotation
+            if not rot and objData.entity and DoesEntityExist(objData.entity) then
+                local r = GetEntityRotation(objData.entity, 2)
+                rot = { x = r.x, y = r.y, z = r.z }
+            end
+            
             local pkg = GetObjectPackageName(objData.model)
             table.insert(list, {
                 model = objData.model,
@@ -443,6 +909,8 @@ function GetSerializableSpawnedObjects()
                 playerName = objData.playerName or "Unknown",
                 displayName = objData.displayName or GetObjectDisplayName(objData.model),
                 coords = coords,
+                heading = objData.heading or (objData.entity and DoesEntityExist(objData.entity) and GetEntityHeading(objData.entity)) or 0.0,
+                rotation = rot,
                 packageName = pkg,
                 hasDualDoors = objData.hasDualDoors == true,
                 interiorModel = objData.interiorModel
@@ -451,6 +919,17 @@ function GetSerializableSpawnedObjects()
     end
     return list
 end
+
+local function OpenNUIMenu()
+    SendNUIMessage({
+        action = 'open',
+        objects = objectList,
+        spawnedObjectsForList = GetSerializableSpawnedObjects(),
+        userSettings = currentUserSettings,
+        pathConfig = Config.PathCreator
+    })
+end
+
 
 -- Object selection highlighting functions
 function HighlightObject(index)
@@ -601,6 +1080,74 @@ RegisterNUICallback('deleteObject', function(data, cb)
     end
 end)
 
+RegisterNUICallback('deleteObjects', function(data, cb)
+    local indices = data.indices
+    if not indices or type(indices) ~= 'table' or #indices == 0 then
+        cb({status = 'error', message = 'No indices provided.'})
+        return
+    end
+
+    -- Convert strings to numbers and filter valid ones
+    local validIndices = {}
+    for _, idx in ipairs(indices) do
+        local n = tonumber(idx)
+        if n and spawnedObjects[n] then
+            table.insert(validIndices, n)
+        end
+    end
+
+    if #validIndices == 0 then
+        cb({status = 'error', message = 'No valid indices for deletion.'})
+        return
+    end
+
+    -- Sort valid indices in descending order to avoid index shifting problems
+    table.sort(validIndices, function(a, b) return a > b end)
+
+    local deletedCount = 0
+    for _, index in ipairs(validIndices) do
+        local objData = spawnedObjects[index]
+        if objData then
+            if highlightedObjectIndex == index then
+                ClearAllHighlights()
+            end
+
+            -- Clean up targets and entities
+            if objData.model == "bazq-sur_kapi" or objData.model == "bazq-sur_mkapi" then
+                objData.index = index
+                CleanupAssociatedDoors(objData)
+            end
+
+            if objData.entity and DoesEntityExist(objData.entity) then
+                UnregisterTargetForEntity(objData.entity)
+                SafeDeleteEntity(objData.entity)
+            end
+
+            if objData.interiorEntity then
+                if type(objData.interiorEntity) == "table" then
+                    for _, doorEntity in ipairs(objData.interiorEntity) do
+                        if DoesEntityExist(doorEntity) then
+                            SafeDeleteEntity(doorEntity)
+                        end
+                    end
+                elseif DoesEntityExist(objData.interiorEntity) then
+                    SafeDeleteEntity(objData.interiorEntity)
+                end
+            end
+
+            table.remove(spawnedObjects, index)
+            deletedCount = deletedCount + 1
+        end
+    end
+
+    if deletedCount > 0 then
+        SaveObjectsToServer()
+        SendNUIMessage({action = "updateSpawnedList", data = GetSerializableSpawnedObjects()})
+    end
+
+    cb({status = 'ok', deletedCount = deletedCount})
+end)
+
 RegisterNUICallback('duplicateObject', function(data, cb)
     if editingObjectData then
         SendNUIMessage({action = 'showError', message = "Finish keyboard editing first (Enter/Esc)."})
@@ -647,6 +1194,9 @@ RegisterNUICallback('duplicateObject', function(data, cb)
                         timestamp = timestamp,
                         originalIndex = newIndex
                     }
+                    
+                    -- Register target for the new entity
+                    RegisterTargetForEntity(newEntity)
                     
                     -- Save to server (align with server handler)
                     TriggerServerEvent("bazq-objectplace:saveObjects", GetSerializableSpawnedObjects())
@@ -774,7 +1324,7 @@ RegisterNUICallback('reopenMenu', function(data, cb)
     -- Reopen the menu when freecam is disabled
     if not isFreecamActive then
         -- Check TestZone access first
-        if debugConfig and debugConfig.testZone and debugConfig.testZone.enabled and IsPlayerInTestZone() then
+        if Config.TestZone and Config.TestZone.enabled and IsPlayerInTestZone() then
             DebugLog("MENU", "Reopening menu via TestZone access")
             TriggerEvent("bazq-objectplace:adminCheckResponse", {hasAccess = true, message = "TestZone access granted"})
         else
@@ -789,13 +1339,21 @@ RegisterNUICallback('closeMenu', function(data, cb)
     DebugLog("MENU", "🔍 CLOSE MENU CALLBACK - IsNuiFocused: " .. tostring(IsNuiFocused()) .. " isMenuOpen: " .. tostring(isMenuOpen))
     DebugLog("MENU", "❌ CLOSE: Closing menu via closeMenu callback")
     SetNuiFocus(false, false)
+    SetNuiFocusKeepInput(false)
     SendNUIMessage({action = 'close'})
+    SendNUIMessage({action = 'editingModeUpdate', editingActive = false})
     isMenuOpen = false  -- Reset menu state
     isMenuLoading = false  -- Reset loading state
     -- Clear highlights when closing menu
     ClearAllHighlights()
     if placing then
         CancelPlacing(false)
+    end
+    if editingObjectData then
+        CancelKeyboardEdit(false)
+    end
+    if exports['bazq-os'] then
+        pcall(function() exports['bazq-os']:StopGizmo() end)
     end
     DebugLog("MENU", "Menu closed via closeMenu callback - isMenuOpen:" .. tostring(isMenuOpen) .. " isMenuLoading:" .. tostring(isMenuLoading))
     cb('ok')
@@ -871,12 +1429,16 @@ end)
 -- Time and Weather freeze thread
 Citizen.CreateThread(function()
     while true do
-        Citizen.Wait(0)
-        if Client.freezeTime then
-            NetworkOverrideClockTime(12, 0, 0)
-        end
-        if Client.freezeWeather then
-            SetWeatherTypeNowPersist('extrasunny')
+        if Client.freezeTime or Client.freezeWeather then
+            if Client.freezeTime then
+                NetworkOverrideClockTime(12, 0, 0)
+            end
+            if Client.freezeWeather then
+                SetWeatherTypeNowPersist('extrasunny')
+            end
+            Citizen.Wait(1000) -- Check/sync every second when active
+        else
+            Citizen.Wait(5000) -- Sleep for 5 seconds when not active
         end
     end
 end)
@@ -1047,8 +1609,8 @@ end, false)
 
 -- Debug command to show current config status
 RegisterCommand('testconfig', function()
-    if debugConfig and debugConfig.testZone then
-        local enabled = debugConfig.testZone.enabled
+    if Config.TestZone then
+        local enabled = Config.TestZone.enabled
         local inZone = IsPlayerInTestZone()
         
         TriggerEvent('chat:addMessage', {
@@ -1065,7 +1627,7 @@ RegisterCommand('testconfig', function()
     else
         TriggerEvent('chat:addMessage', {
             color = { 255, 165, 0 },
-            args = { "[CONFIG-DEBUG]", "No debug config found!" }
+            args = { "[CONFIG-DEBUG]", "No Config.TestZone found!" }
         })
     end
 end, false)
@@ -1105,7 +1667,7 @@ function CanUseF6Freecam()
     end
 end
 
-local function ToggleFreecam()
+ToggleFreecam = function()
     -- This function now assumes permission check is done externally
     -- It simply toggles the freecam state
     
@@ -1150,33 +1712,26 @@ Citizen.CreateThread(function()
 end)
 
 -- Key bindings for F7 (menu), F6 (freecam), and H (clear selection)
-Citizen.CreateThread(function()
-    while true do
-        Citizen.Wait(0)
-        -- F7 key now handled by RegisterCommand('bazq_f7') with proper permission check
-        -- if IsControlJustReleased(0, menuOpenKey) or IsDisabledControlJustReleased(0, menuOpenKey) then
-        --     ToggleMenu()
-        -- F6 key now handled by RegisterCommand('bazq_f6') with proper permission check
-        -- if IsControlJustReleased(0, freecamKey) or IsDisabledControlJustReleased(0, freecamKey) then
-        --     ToggleFreecam()
-        if IsControlJustReleased(0, 74) and not isMenuOpen and not placing and not editingObjectData then -- H key
-            if highlightedObjectIndex then
-                ClearAllHighlights()
-                -- Show temporary notification
-                local wasUIVisible = isMenuOpen
-                if not wasUIVisible then
-                    SendNUIMessage({action = 'show'})
-                end
-                SendNUIMessage({action = 'objectSpawned', message = "Selection cleared."})
-                if not wasUIVisible then
-                    Citizen.SetTimeout(1500, function()
-                        SendNUIMessage({action = 'hide'})
-                    end)
-                end
+-- Register selection clear command and bind H key
+RegisterCommand('bazq_clear_selection', function()
+    if not isMenuOpen and not placing and not editingObjectData and not pathDrawing then
+        if highlightedObjectIndex then
+            ClearAllHighlights()
+            -- Show temporary notification
+            local wasUIVisible = isMenuOpen
+            if not wasUIVisible then
+                SendNUIMessage({action = 'show'})
+            end
+            SendNUIMessage({action = 'objectSpawned', message = "Selection cleared."})
+            if not wasUIVisible then
+                Citizen.SetTimeout(1500, function()
+                    SendNUIMessage({action = 'hide'})
+                end)
             end
         end
     end
-end)
+end, false)
+RegisterKeyMapping('bazq_clear_selection', 'Clear Object Selection', 'keyboard', 'H')
 
 function DrawTxt(text, x,y,s,r,g,b,a,fnt,jst,shd,otl) SetTextFont(fnt or 0);SetTextProportional(0);SetTextScale(s,s);SetTextColour(r,g,b,a);if shd then SetTextDropShadow(2,2,0,0,0)end;if otl then SetTextOutline()end;if jst=="CENTER"then SetTextCentre(true)elseif jst=="RIGHT"then SetTextWrap(0.0,x);SetTextRightJustify(true)end;SetTextEntry("STRING");AddTextComponentString(text);DrawText(x,y) end
 
@@ -1262,10 +1817,10 @@ function StartPlacingObject(modelName)
     SetEntityAlpha(objectEntity,180,false)
     SetEntityProofs(objectEntity, false, false, false, false, false, false, false, false)
     
-    -- Set green color tint
-    SetEntityRenderScorched(objectEntity, true)
-    SetEntityDrawOutline(objectEntity, true)
-    SetEntityDrawOutlineColor(104, 182, 91, 255) -- Green outline
+    -- Set green color tint (Commented out to prevent rendering/invisibility bugs)
+    -- SetEntityRenderScorched(objectEntity, true)
+    -- SetEntityDrawOutline(objectEntity, true)
+    -- SetEntityDrawOutlineColor(104, 182, 91, 255) -- Green outline
     
     Citizen.CreateThread(function()
         local debugCounter = 0
@@ -1532,6 +2087,9 @@ function CancelPlacing(shouldReopenMenu)
     objectEntity=nil;selectedObject=nil
     manualHeightAdjusted = false
     SendNUIMessage({action = 'editingModeUpdate', editingActive = false})
+    if exports['bazq-os'] then
+        pcall(function() exports['bazq-os']:StopGizmo() end)
+    end
 
     -- Always reset UI state so controls don't remain blocked
     SetNuiFocus(false, false)
@@ -1551,14 +2109,7 @@ function CancelPlacing(shouldReopenMenu)
     -- Auto-return to menu after placement cancellation
     Citizen.SetTimeout(300, function()
         if not placing and not editingObjectData then
-            SetNuiFocus(true, true)
-            isMenuOpen = true  -- Set menu as open
-            SendNUIMessage({
-                action = 'open',
-                objects = objectList,
-                spawnedObjectsForList = GetSerializableSpawnedObjects(),
-                userSettings = currentUserSettings
-            })
+            OpenNUIMenu()
         end
     end)
 end
@@ -1867,12 +2418,14 @@ function ConfirmPlacement()
             end
         end
         
+        local rot = GetEntityRotation(objectEntity, 2)
         -- Store the main object
         local objectData = {
             entity=objectEntity,
             model=selectedObject,
             coords=mainCoords,
             heading=mainHeading,
+            rotation={x = rot.x, y = rot.y, z = rot.z},
             timestamp=GetRealTimestamp(), -- Real Unix timestamp from web
             playerName=currentPlacementOptions.playerName or "Unknown"
         }
@@ -1911,8 +2464,13 @@ function ConfirmPlacement()
         end
         
         table.insert(spawnedObjects, objectData)
+        RegisterTargetForEntity(objectData.entity)
         SaveObjectsToServer();SendNUIMessage({action="updateSpawnedList",data=GetSerializableSpawnedObjects()})
         
+        -- Stop gizmo immediately when placement completes
+        if exports['bazq-os'] then
+            pcall(function() exports['bazq-os']:StopGizmo() end)
+        end
         
         objectEntity=nil;selectedObject=nil
         SendNUIMessage({action = 'editingModeUpdate', editingActive = false})
@@ -1941,14 +2499,7 @@ function ConfirmPlacement()
                 DebugLog("PLACEMENT", "Final keepMenuOpen decision: " .. tostring(keepMenuOpen))
                 
                 if keepMenuOpen then
-                    SetNuiFocus(true, true)
-                    isMenuOpen = true  -- Set menu as open
-                    SendNUIMessage({
-                        action = 'open',
-                        objects = objectList,
-                        spawnedObjectsForList = GetSerializableSpawnedObjects(),
-                        userSettings = currentUserSettings
-                    })
+                    OpenNUIMenu()
                 end
             end
         end)
@@ -1959,32 +2510,48 @@ function KeyboardEditLoop()
     if not editingObjectData or not editingObjectData.entity or not DoesEntityExist(editingObjectData.entity) then editingObjectData=nil; return end
     local ent = editingObjectData.entity
     SetEntityCollision(ent, false, false)
-    FreezeEntityPosition(PlayerPedId(), true) -- Freeze player ped
     
+    -- Freeze player ped completely during editing
+    local playerPed = PlayerPedId()
+    FreezeEntityPosition(playerPed, true)
+
+    -- Start 3D Gizmo
+    if exports['bazq-os'] then
+        pcall(function() exports['bazq-os']:StartGizmo(ent, "bazq_edit_" .. tostring(ent)) end)
+    end
+
     -- Apply green glowing wireframe effect for editing
     SetEntityAlpha(ent, 180, false)
     SetEntityDrawOutline(ent, true)
     SetEntityDrawOutlineColor(104, 182, 91, 255) -- Green outline
     SetEntityRenderScorched(ent, true)
 
-    local nudgeSpeed, rotationSpeed = 0.02, 1.0
+    local nudgeSpeed = 0.02
     local currentRotation = GetEntityHeading(ent)
     local rotationSnapMode = false -- false = 1° rotation, true = 5° rotation
+
+    SendNUIMessage({
+        action = 'editingModeUpdate',
+        message = "EDIT MODE: WASD:Move | Alt/F:Height | Q/E:Rotate (1°) | G:Snap Toggle | X:Toggle 5° Mode | R:Reset Rotation | LMB/ENTER:Save | RMB/ESC:Cancel | Rotation: " .. math.floor(currentRotation) .. "°",
+        editingActive = true
+    })
 
     while editingObjectData and editingObjectData.entity == ent and DoesEntityExist(ent) do
         Citizen.Wait(0)
         
         -- Disable cover system during editing so Q key works for rotation
         DisableControlAction(0, 44, true) -- INPUT_COVER (Q key)
-        
+        DisableControlAction(0, 24, true) -- INPUT_ATTACK
+        DisableControlAction(0, 25, true) -- INPUT_AIM
+
         local currentCoords, currentHeading = GetEntityCoords(ent), GetEntityHeading(ent)
         local rightVec, fwdVec, upVec = GetEntityMatrix(ent)
         currentRotation = currentHeading
-        
-        -- Enhanced XYZ arrows for edit mode - much better than placement mode!
+
+        -- Draw 3D Gizmo & Spatial Grid
         DrawAdvancedXYZArrows(ent, currentCoords, rightVec, fwdVec, upVec)
-        
-        -- Keyboard movement controls (using disabled controls to avoid conflicts)
+
+        -- Movement controls
         if IsDisabledControlPressed(0, 32) then SetEntityCoords(ent, currentCoords + fwdVec * nudgeSpeed, false, false, false, true) end -- W
         if IsDisabledControlPressed(0, 33) then SetEntityCoords(ent, currentCoords - fwdVec * nudgeSpeed, false, false, false, true) end -- S
         if IsDisabledControlPressed(0, 30) then SetEntityCoords(ent, currentCoords - rightVec * nudgeSpeed, false, false, false, true) end -- A
@@ -1993,19 +2560,15 @@ function KeyboardEditLoop()
         -- Height controls (Alt/F)
         if IsDisabledControlPressed(0, 19) then SetEntityCoords(ent, currentCoords + upVec * nudgeSpeed, false, false, false, true) end    -- Alt key - Up
         if IsDisabledControlPressed(0, 23) then SetEntityCoords(ent, currentCoords - upVec * nudgeSpeed, false, false, false, true) end    -- F key - Down
-        
-        -- Save with LMB, Cancel with RMB
-        if IsDisabledControlJustReleased(0, 24) then ApplyKeyboardEdit(); break end -- LMB
-        if IsDisabledControlJustReleased(0, 25) then CancelKeyboardEdit(true); break end -- RMB
-        
+
         -- Toggle rotation snap mode with X key
         if IsDisabledControlJustReleased(0, 73) then -- X key
             rotationSnapMode = not rotationSnapMode
             local modeText = rotationSnapMode and "5°" or "1°"
-            SendNUIMessage({action = 'editingModeUpdate', message = "EDIT MODE: WASD:Move | Alt/F:Height | Q/E:Rotate (" .. modeText .. ") | G:Snap Toggle | X:Toggle 5° Mode | R:Reset Rotation | LMB:Save | RMB:Cancel | Rotation: " .. math.floor(currentRotation) .. "°", editingActive = true})
+            SendNUIMessage({action = 'editingModeUpdate', message = "EDIT MODE: WASD:Move | Alt/F:Height | Q/E:Rotate (" .. modeText .. ") | G:Snap Toggle | X:Toggle 5° Mode | R:Reset Rotation | LMB/ENTER:Save | RMB/ESC:Cancel | Rotation: " .. math.floor(currentRotation) .. "°", editingActive = true})
         end
         
-        -- Rotation controls (Q/E) with dynamic step size
+        -- Rotation controls (Q/E)
         local dynamicRotationSpeed = rotationSnapMode and 5.0 or 1.0
         if IsDisabledControlPressed(0, 44) then
             SetEntityHeading(ent, currentHeading + dynamicRotationSpeed)
@@ -2021,32 +2584,42 @@ function KeyboardEditLoop()
             SetEntityHeading(ent, 0.0)
             currentRotation = 0.0
             local modeText = rotationSnapMode and "5°" or "1°"
-            SendNUIMessage({action = 'editingModeUpdate', message = "EDIT MODE: WASD:Move | Alt/F:Height | Q/E:Rotate (" .. modeText .. ") | G:Snap Toggle | X:Toggle 5° Mode | R:Reset Rotation | LMB:Save | RMB:Cancel | Rotation: 0°", editingActive = true})
+            SendNUIMessage({action = 'editingModeUpdate', message = "EDIT MODE: WASD:Move | Alt/F:Height | Q/E:Rotate (" .. modeText .. ") | G:Snap Toggle | X:Toggle 5° Mode | R:Reset Rotation | LMB/ENTER:Save | RMB/ESC:Cancel | Rotation: 0°", editingActive = true})
         end
-        
-        -- Update rotation display when manually rotating
-        if IsDisabledControlPressed(0,44) or IsDisabledControlPressed(0,38) then
-            local modeText = rotationSnapMode and "5°" or "1°"
-            SendNUIMessage({action = 'editingModeUpdate', message = "EDIT MODE: WASD:Move | Alt/F:Height | Q/E:Rotate (" .. modeText .. ") | G:Snap Toggle | X:Toggle 5° Mode | R:Reset Rotation | LMB:Save | RMB:Cancel | Rotation: " .. math.floor(currentRotation) .. "°", editingActive = true})
-        end
-        
-        -- Snap to ground toggle with G key in edit mode
+
+        -- Snap to ground toggle with G key
         if IsControlJustReleased(0, 47) then -- G key
             currentPlacementOptions.snapToGround = not currentPlacementOptions.snapToGround
             local status = currentPlacementOptions.snapToGround and "ON" or "OFF"
             SendNUIMessage({action = 'objectSpawned', message = "Ground Snap: " .. status})
-            -- print("[OP] Edit mode ground snap toggled: " .. status)
-            
-            -- Apply snap immediately if enabled
             if currentPlacementOptions.snapToGround then
                 AlignObjectToGround(ent)
             end
         end
-        
-        -- Old Enter/Esc controls removed - now using LMB/RMB above
+
+        -- Save with LMB or ENTER
+        if IsDisabledControlJustReleased(0, 24) or IsDisabledControlJustReleased(0, 191) or IsControlJustReleased(0, 191) or IsDisabledControlJustReleased(0, 201) or IsControlJustReleased(0, 201) then
+            ApplyKeyboardEdit()
+            break
+        end
+
+        -- Cancel with RMB or ESC
+        if IsDisabledControlJustReleased(0, 25) or IsDisabledControlJustReleased(0, 322) or IsControlJustReleased(0, 322) or IsDisabledControlJustReleased(0, 200) or IsControlJustReleased(0, 200) then
+            CancelKeyboardEdit(true)
+            break
+        end
     end
-    
+
+    -- Stop interactive gizmo when loop finishes
+    if exports['bazq-os'] then
+        pcall(function() exports['bazq-os']:StopGizmo() end)
+    end
+
+    SetNuiFocus(false, false)
+    SetNuiFocusKeepInput(false)
     FreezeEntityPosition(PlayerPedId(), false) -- Unfreeze player ped
+    SendNUIMessage({action = 'editingModeUpdate', editingActive = false})
+
     if DoesEntityExist(ent) then
         SetEntityCollision(ent, true, true)
         -- Restore normal appearance
@@ -2095,6 +2668,8 @@ function ApplyKeyboardEdit()
         -- Update main object data
         spawnedObjects[targetIndex].coords = newCoords
         spawnedObjects[targetIndex].heading = newHeading
+        local rot = GetEntityRotation(ent, 2)
+        spawnedObjects[targetIndex].rotation = {x = rot.x, y = rot.y, z = rot.z}
         
         -- Update interior entity if it exists
         if objData.interiorEntity then
@@ -2167,16 +2742,12 @@ function ApplyKeyboardEdit()
         -- Auto-return to menu after editing
         Citizen.SetTimeout(300, function()
             if not placing and not editingObjectData then
-                SetNuiFocus(true, true)
-                isMenuOpen = true  -- Set menu as open
-                SendNUIMessage({
-                    action = 'open',
-                    objects = objectList,
-                    spawnedObjectsForList = GetSerializableSpawnedObjects(),
-                    userSettings = currentUserSettings
-                })
+                OpenNUIMenu()
             end
         end)
+    end
+    if exports['bazq-os'] then
+        pcall(function() exports['bazq-os']:StopGizmo() end)
     end
     editingObjectData = nil
 end
@@ -2257,6 +2828,9 @@ function CancelKeyboardEdit(revert)
         SendNUIMessage({action = 'editingModeUpdate', message = "Object edit cancelled.", isError = false, editingActive = false})
         DebugLog("EDIT", "Edit cancelled: " .. editingObjectData.model)
     end
+    if exports['bazq-os'] then
+        pcall(function() exports['bazq-os']:StopGizmo() end)
+    end
     editingObjectData = nil
 end
 
@@ -2298,6 +2872,7 @@ function CleanupAssociatedDoors(parentObjData)
         local doorData = spawnedObjects[doorIndex]
         
         if doorData and doorData.entity and DoesEntityExist(doorData.entity) then
+            UnregisterTargetForEntity(doorData.entity)
             SafeDeleteEntity(doorData.entity)
             DebugDeletion("Deleted door entity: " .. (doorData.model or "unknown"))
         end
@@ -2358,6 +2933,7 @@ function DeleteSpawnedObject(index)
         
         -- Delete main entity
         if objData.entity and DoesEntityExist(objData.entity) then
+            UnregisterTargetForEntity(objData.entity)
             SafeDeleteEntity(objData.entity)
             DebugDeletion("Deleted main entity for " .. (objData.model or "unknown"))
         end
@@ -2446,54 +3022,28 @@ function RaycastFromCameraWithEntity()
 end
 function RotationToDirection(rot)local z,x=math.rad(rot.z),math.rad(rot.x);local cX=math.cos(x);return vector3(-math.sin(z)*cX,math.cos(z)*cX,math.sin(x))end
 
--- Advanced XYZ arrows for edit mode - much better than placement mode!
+-- Interactive Native DrawGizmo (0xEB2EDCA2) Entegrasyonu
+RegisterNetEvent('bazq-os:client:onGizmoTransformUpdate', function(entity, x, y, z, heading)
+    if editingObjectData and editingObjectData.entity == entity then
+        SendNUIMessage({
+            action = 'editingModeUpdate',
+            message = string.format("EDIT MODE: Gizmo active | Pos: %.2f, %.2f, %.2f | Rot: %d° | LMB:Save | RMB:Cancel", x, y, z, math.floor(heading)),
+            editingActive = true
+        })
+    end
+end)
+
+-- Advanced XYZ arrows & native gizmo for edit/placement mode
 function DrawAdvancedXYZArrows(entity, coords, rightVec, fwdVec, upVec)
-    local arrowLength = 1.2
-    local arrowHeadSize = 0.15
-    local lineThickness = 0.02
-    
-    -- X-Axis (Right) - Red Arrow
-    local xEnd = coords + rightVec * arrowLength
-    DrawLine(coords.x, coords.y, coords.z, xEnd.x, xEnd.y, xEnd.z, 255, 50, 50, 255)
-    
-    -- X-Axis arrow head (3 lines forming arrow tip)
-    local xArrowTip1 = xEnd - rightVec * arrowHeadSize + fwdVec * arrowHeadSize * 0.5
-    local xArrowTip2 = xEnd - rightVec * arrowHeadSize - fwdVec * arrowHeadSize * 0.5
-    local xArrowTip3 = xEnd - rightVec * arrowHeadSize + upVec * arrowHeadSize * 0.5
-    DrawLine(xEnd.x, xEnd.y, xEnd.z, xArrowTip1.x, xArrowTip1.y, xArrowTip1.z, 255, 50, 50, 255)
-    DrawLine(xEnd.x, xEnd.y, xEnd.z, xArrowTip2.x, xArrowTip2.y, xArrowTip2.z, 255, 50, 50, 255)
-    DrawLine(xEnd.x, xEnd.y, xEnd.z, xArrowTip3.x, xArrowTip3.y, xArrowTip3.z, 255, 50, 50, 255)
-    
-    -- Y-Axis (Forward) - Green Arrow
-    local yEnd = coords + fwdVec * arrowLength
-    DrawLine(coords.x, coords.y, coords.z, yEnd.x, yEnd.y, yEnd.z, 50, 255, 50, 255)
-    
-    -- Y-Axis arrow head
-    local yArrowTip1 = yEnd - fwdVec * arrowHeadSize + rightVec * arrowHeadSize * 0.5
-    local yArrowTip2 = yEnd - fwdVec * arrowHeadSize - rightVec * arrowHeadSize * 0.5
-    local yArrowTip3 = yEnd - fwdVec * arrowHeadSize + upVec * arrowHeadSize * 0.5
-    DrawLine(yEnd.x, yEnd.y, yEnd.z, yArrowTip1.x, yArrowTip1.y, yArrowTip1.z, 50, 255, 50, 255)
-    DrawLine(yEnd.x, yEnd.y, yEnd.z, yArrowTip2.x, yArrowTip2.y, yArrowTip2.z, 50, 255, 50, 255)
-    DrawLine(yEnd.x, yEnd.y, yEnd.z, yArrowTip3.x, yArrowTip3.y, yArrowTip3.z, 50, 255, 50, 255)
-    
-    -- Z-Axis (Up) - Blue Arrow
-    local zEnd = coords + upVec * arrowLength
-    DrawLine(coords.x, coords.y, coords.z, zEnd.x, zEnd.y, zEnd.z, 50, 50, 255, 255)
-    
-    -- Z-Axis arrow head
-    local zArrowTip1 = zEnd - upVec * arrowHeadSize + rightVec * arrowHeadSize * 0.5
-    local zArrowTip2 = zEnd - upVec * arrowHeadSize - rightVec * arrowHeadSize * 0.5
-    local zArrowTip3 = zEnd - upVec * arrowHeadSize + fwdVec * arrowHeadSize * 0.5
-    DrawLine(zEnd.x, zEnd.y, zEnd.z, zArrowTip1.x, zArrowTip1.y, zArrowTip1.z, 50, 50, 255, 255)
-    DrawLine(zEnd.x, zEnd.y, zEnd.z, zArrowTip2.x, zArrowTip2.y, zArrowTip2.z, 50, 50, 255, 255)
-    DrawLine(zEnd.x, zEnd.y, zEnd.z, zArrowTip3.x, zArrowTip3.y, zArrowTip3.z, 50, 50, 255, 255)
-    
-    -- Add axis labels using 3D text
-    DrawText3D(xEnd.x + 0.1, xEnd.y, xEnd.z, "X", 255, 50, 50, 0.3)
-    DrawText3D(yEnd.x, yEnd.y + 0.1, yEnd.z, "Y", 50, 255, 50, 0.3)
-    DrawText3D(zEnd.x, zEnd.y, zEnd.z + 0.1, "Z", 50, 50, 255, 0.3)
-    
-    -- Draw coordinate grid around object for better spatial awareness
+    if entity and DoesEntityExist(entity) then
+        pcall(function()
+            if exports['bazq-os'] and not exports['bazq-os']:IsGizmoActive() then
+                exports['bazq-os']:StartGizmo(entity, "bazq_gizmo_" .. tostring(entity))
+            end
+        end)
+    end
+
+    -- Subtle grid around object for spatial reference
     DrawEditModeGrid(coords, rightVec, fwdVec, upVec)
 end
 
@@ -2577,12 +3127,20 @@ function SaveObjectsToServer()
                 DebugLog("SAVE", "Skipping door entity " .. objData.model .. " - doors should not be saved as standalone objects")
                 goto continue
             end
+            
+            local rot = objData.rotation
+            if not rot and objData.entity and DoesEntityExist(objData.entity) then
+                local r = GetEntityRotation(objData.entity, 2)
+                rot = { x = r.x, y = r.y, z = r.z }
+            end
+            
             DebugLog("SAVE", string.format("Item %d: Model=%s, X=%.2f, Y=%.2f, Z=%.2f, H=%.2f, TS=%s, Player=%s",
                 i, objData.model, objData.coords.x, objData.coords.y, objData.coords.z, objData.heading, objData.timestamp or "N/A", objData.playerName or "Unknown"))
             local saveData = {
                 model=objData.model,
                 coords=objData.coords,
                 heading=objData.heading,
+                rotation=rot,
                 timestamp=objData.timestamp or "",
                 playerName=objData.playerName or "Unknown"
             }
@@ -2661,7 +3219,11 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                 
                 -- 2. Force coordinates immediately (no clearArea!)
                 SetEntityCoords(ent, objSD.coords.x, objSD.coords.y, objSD.coords.z, false, false, false, false)
-                SetEntityHeading(ent, objSD.heading or 0.0)
+                if objSD.rotation then
+                    SetEntityRotation(ent, objSD.rotation.x, objSD.rotation.y, objSD.rotation.z, 2, true)
+                else
+                    SetEntityHeading(ent, objSD.heading or 0.0)
+                end
                 
                 -- 3. Freeze completely
                 FreezeEntityPosition(ent, true)
@@ -2683,6 +3245,7 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                         model=objSD.model,
                         coords=lockedCoords,
                         heading=objSD.heading,
+                        rotation=objSD.rotation,
                         timestamp=objSD.timestamp or "",
                         playerName=objSD.playerName or "Unknown"
                     }
@@ -2825,6 +3388,7 @@ AddEventHandler("bazq-objectplace:loadObjects", function(objectsData)
                     end
                     
                     table.insert(spawnedObjects, objectData)
+                    RegisterTargetForEntity(ent)
                 else
                     DebugLog("LOADING", "CreateFail "..objSD.model)
                 end
@@ -2885,19 +3449,744 @@ end)
 RegisterNUICallback('reopenMenu', function(data, cb)
     DebugLog("PLACEMENT", "Reopen menu requested from NUI localStorage check")
     
-    if not placing and not editingObjectData and not isMenuOpen then
+    if not placing and not editingObjectData and not isMenuOpen and not pathDrawing then
         SetNuiFocus(true, true)
         isMenuOpen = true
-        SendNUIMessage({
-            action = 'open',
-            objects = objectList,
-            spawnedObjectsForList = GetSerializableSpawnedObjects(),
-            userSettings = currentUserSettings
-        })
+        OpenNUIMenu()
         DebugLog("PLACEMENT", "Menu reopened successfully")
     end
     
     cb({status = 'ok'})
+end)
+
+RegisterNUICallback('saveLockState', function(data, cb)
+    TriggerServerEvent('bazq-objectplace:saveLockState', data.locked)
+    cb('ok')
+end)
+
+RegisterNetEvent("bazq-objectplace:receiveLockState")
+AddEventHandler("bazq-objectplace:receiveLockState", function(locked)
+    if currentUserSettings then
+        currentUserSettings.lockNonOwners = locked
+    end
+    SendNUIMessage({
+        action = "updateLockState",
+        locked = locked
+    })
+end)
+
+local function AlignEntityToNormal(entity, normal, heading)
+    local headingRad = math.rad(heading)
+    local forward = vector3(math.sin(headingRad), math.cos(headingRad), 0.0)
+    local right = vector3(math.cos(headingRad), -math.sin(headingRad), 0.0)
+    
+    local dotF = forward.x * normal.x + forward.y * normal.y + forward.z * normal.z
+    local dotR = right.x * normal.x + right.y * normal.y + right.z * normal.z
+    
+    local projForward = forward - normal * dotF
+    local projRight = right - normal * dotR
+    
+    local lenF = math.sqrt(projForward.x^2 + projForward.y^2 + projForward.z^2)
+    if lenF > 0.001 then projForward = projForward / lenF end
+    
+    local lenR = math.sqrt(projRight.x^2 + projRight.y^2 + projRight.z^2)
+    if lenR > 0.001 then projRight = projRight / lenR end
+    
+    local pitch = math.deg(math.asin(projForward.z))
+    local roll = -math.deg(math.asin(projRight.z))
+    
+    SetEntityRotation(entity, pitch, roll, heading, 2, true)
+end
+
+local function BuildPathProps(pointA, pointB, selectedItem, isPackage, customWidth, options, mode, randomizerProps, spawnTower, prevDir, customPackageProps)
+    local dist = #(pointB - pointA)
+    if dist < 0.1 then return false, 0.0 end
+    
+    local dir = (pointB - pointA) / dist
+    local startDist = 0.0
+    
+    local cornerModel = "bazq-kule1"
+    local cornerOffset = 2.7
+    
+    local pkgConf = Config.PathCreator.packages[selectedItem]
+    if isPackage and pkgConf and type(pkgConf) == "table" then
+        if pkgConf.cornerModel then cornerModel = pkgConf.cornerModel end
+        if pkgConf.cornerOffset then cornerOffset = pkgConf.cornerOffset end
+    end
+    
+    -- Corner tower placement at the start of this segment (junction pivot)
+    if spawnTower then
+        local towerHash = GetHashKey(cornerModel)
+        RequestModel(towerHash)
+        local startTime = GetGameTimer()
+        while not HasModelLoaded(towerHash) do
+            if GetGameTimer() - startTime > 3000 then break end
+            Citizen.Wait(10)
+        end
+        
+        if HasModelLoaded(towerHash) then
+            local towerZ = pointA.z
+            if options.snapToGround then
+                local hitVal, gZ = GetGroundZFor_3dCoord(pointA.x, pointA.y, pointA.z + 10.0, false)
+                if hitVal then towerZ = gZ end
+            end
+            
+            local towerHeading = math.deg(math.atan2(dir.x, dir.y))
+            local towerObj = CreateObject(towerHash, pointA.x, pointA.y, towerZ, true, true, false)
+            if DoesEntityExist(towerObj) then
+                SetEntityAsMissionEntity(towerObj, true, true)
+                FreezeEntityPosition(towerObj, true)
+                SetEntityCollision(towerObj, true, true)
+                SetEntityHeading(towerObj, towerHeading)
+                
+                local rot = GetEntityRotation(towerObj, 2)
+                local newIndex = #spawnedObjects + 1
+                spawnedObjects[newIndex] = {
+                    entity = towerObj,
+                    model = cornerModel,
+                    coords = GetEntityCoords(towerObj),
+                    heading = GetEntityHeading(towerObj),
+                    rotation = {x = rot.x, y = rot.y, z = rot.z},
+                    playerName = currentPlacementOptions.playerName or "Unknown",
+                    timestamp = GetRealTimestamp(),
+                    originalIndex = newIndex
+                }
+                RegisterTargetForEntity(towerObj)
+            end
+        end
+        
+        -- Start wall placement offset by tower radius
+        startDist = cornerOffset
+    end
+    
+    local tempDist = startDist
+    local propsToSpawn = {}
+    local packageProps = {}
+    
+    if mode == "single" then
+        if isPackage then
+            local pkgData = Config.PathCreator.packages[selectedItem]
+            if type(pkgData) == "table" and pkgData.props then
+                packageProps = pkgData.props
+            else
+                packageProps = packageObjects[selectedItem] or {}
+            end
+            if #packageProps == 0 then
+                table.insert(packageProps, selectedItem)
+            end
+        end
+    end
+    
+    local spawnedCount = 0
+    local safetyCounter = 0
+    
+    while tempDist + 0.1 < dist and safetyCounter < 200 do
+        safetyCounter = safetyCounter + 1
+        
+        local propName = ""
+        local propWidth = customWidth
+        
+        if mode == "multi" then
+            local randVal = math.random(1, 100)
+            local selectedProp = nil
+            local currentSum = 0
+            for _, p in ipairs(randomizerProps) do
+                currentSum = currentSum + (tonumber(p.weight) or 0)
+                if randVal <= currentSum then
+                    selectedProp = p
+                    break
+                end
+            end
+            if not selectedProp and #randomizerProps > 0 then
+                selectedProp = randomizerProps[1]
+            end
+            propName = selectedProp and selectedProp.model or ""
+            propWidth = selectedProp and tonumber(selectedProp.width) or customWidth
+        elseif isPackage then
+            local pkgConf = Config.PathCreator.packages[selectedItem]
+            local selectedProp = nil
+            
+            -- Try UI-provided custom weights first
+            if customPackageProps and #customPackageProps > 0 then
+                local totalWeight = 0
+                for _, p in ipairs(customPackageProps) do
+                    totalWeight = totalWeight + (tonumber(p.weight) or 0)
+                end
+                if totalWeight > 0 then
+                    local randVal = math.random(1, totalWeight)
+                    local currentSum = 0
+                    for _, p in ipairs(customPackageProps) do
+                        currentSum = currentSum + (tonumber(p.weight) or 0)
+                        if randVal <= currentSum then
+                            selectedProp = p.model
+                            break
+                        end
+                    end
+                end
+            end
+            
+            -- Fallback to config weights or list if customPackageProps is not provided or empty
+            if not selectedProp and pkgConf and pkgConf.props then
+                if type(pkgConf.props[1]) == "table" then
+                    local totalWeight = 0
+                    for _, p in ipairs(pkgConf.props) do
+                        totalWeight = totalWeight + (p.weight or 0)
+                    end
+                    local randVal = math.random(1, totalWeight)
+                    local currentSum = 0
+                    for _, p in ipairs(pkgConf.props) do
+                        currentSum = currentSum + (p.weight or 0)
+                        if randVal <= currentSum then
+                            selectedProp = p.model
+                            break
+                        end
+                    end
+                else
+                    selectedProp = pkgConf.props[math.random(1, #pkgConf.props)]
+                end
+            end
+            propName = selectedProp or selectedItem
+            propWidth = Config.PathCreator.props[propName] or (pkgConf and type(pkgConf) == "table" and pkgConf.width) or customWidth
+        else
+            propName = selectedItem
+            propWidth = Config.PathCreator.props[selectedItem] or customWidth
+        end
+        
+        -- Prevent spawning past pointB
+        if tempDist + propWidth > dist then
+            break
+        end
+        
+        local centerPos = pointA + dir * (tempDist + propWidth / 2)
+        local spawnZ = centerPos.z
+        local groundNormal = vector3(0.0, 0.0, 1.0)
+        
+        if options.snapToGround then
+            local ray = StartShapeTestRay(centerPos.x, centerPos.y, centerPos.z + 10.0, centerPos.x, centerPos.y, centerPos.z - 10.0, 1, 0, 7)
+            local _, hit, hitCoords, normal, _ = GetShapeTestResult(ray)
+            if hit == 1 then
+                spawnZ = hitCoords.z
+                groundNormal = normal
+            else
+                local success, gZ = GetGroundZFor_3dCoord(centerPos.x, centerPos.y, centerPos.z + 10.0, false)
+                if success then
+                    spawnZ = gZ
+                end
+            end
+        end
+        
+        -- Determine heading offset (Y-oriented props are oriented along heading vector, i.e., 0.0 deg offset)
+        local propHeadingOffset = 90.0
+        if propName:match("bazq%-sur%d+") then
+            propHeadingOffset = 0.0
+        end
+        local pkgConf = Config.PathCreator.packages[selectedItem]
+        if isPackage and pkgConf and type(pkgConf) == "table" and pkgConf.headingOffset ~= nil then
+            propHeadingOffset = pkgConf.headingOffset
+        end
+        
+        local pathHeading = math.deg(math.atan2(dir.x, dir.y))
+        local baseHeading = pathHeading + propHeadingOffset
+        if options.randomRotation then
+            baseHeading = baseHeading + math.random(0, 360)
+        end
+        
+        local modelHash = GetHashKey(propName)
+        if IsModelInCdimage(modelHash) and IsModelValid(modelHash) then
+            RequestModel(modelHash)
+            local startTime = GetGameTimer()
+            while not HasModelLoaded(modelHash) do
+                if GetGameTimer() - startTime > 3000 then break end
+                Citizen.Wait(10)
+            end
+            if HasModelLoaded(modelHash) then
+                local obj = CreateObject(modelHash, centerPos.x, centerPos.y, spawnZ, true, true, false)
+                if DoesEntityExist(obj) then
+                    SetEntityAsMissionEntity(obj, true, true)
+                    FreezeEntityPosition(obj, true)
+                    SetEntityCollision(obj, true, true)
+                    
+                    if options.alignToGround then
+                        AlignEntityToNormal(obj, groundNormal, baseHeading)
+                    else
+                        SetEntityHeading(obj, baseHeading)
+                    end
+                    
+                    -- Spawn double doors if it is a gate frame (bazq-sur_kapi)
+                    local isDualDoors = false
+                    local interiorEnt = nil
+                    local interiorModelVal = nil
+                    
+                    if propName == "bazq-sur_kapi" then
+                        local doorHash = GetHashKey("bazq-sur_mkapi")
+                        RequestModel(doorHash)
+                        local doorStartTime = GetGameTimer()
+                        while not HasModelLoaded(doorHash) do
+                            if GetGameTimer() - doorStartTime > 3000 then break end
+                            Citizen.Wait(10)
+                        end
+                        
+                        if HasModelLoaded(doorHash) then
+                            -- Calculate forward direction based on baseHeading
+                            local headingRad = math.rad(baseHeading)
+                            local forwardX = -math.sin(headingRad)
+                            local forwardY = math.cos(headingRad)
+                            
+                            -- Spawn first door with positive Y offset (+90 degree rotation)
+                            local door1Coords = vector3(
+                                centerPos.x + (5.37824 * forwardX),
+                                centerPos.y + (5.37824 * forwardY),
+                                spawnZ
+                            )
+                            local door1Entity = CreateObject(doorHash, door1Coords.x, door1Coords.y, door1Coords.z, true, true, false)
+                            if DoesEntityExist(door1Entity) then
+                                SetEntityHeading(door1Entity, baseHeading + 90.0)
+                                SetEntityAsMissionEntity(door1Entity, true, true)
+                                SetEntityDynamic(door1Entity, true)
+                                SetEntityCollision(door1Entity, true, true)
+                                if options.alignToGround then
+                                    AlignEntityToNormal(door1Entity, groundNormal, baseHeading + 90.0)
+                                end
+                            end
+                            
+                            -- Spawn second door with negative Y offset (-90 degree rotation)
+                            local door2Coords = vector3(
+                                centerPos.x - (5.37824 * forwardX),
+                                centerPos.y - (5.37824 * forwardY),
+                                spawnZ
+                            )
+                            local door2Entity = CreateObject(doorHash, door2Coords.x, door2Coords.y, door2Coords.z, true, true, false)
+                            if DoesEntityExist(door2Entity) then
+                                SetEntityHeading(door2Entity, baseHeading - 90.0)
+                                SetEntityAsMissionEntity(door2Entity, true, true)
+                                SetEntityDynamic(door2Entity, true)
+                                SetEntityCollision(door2Entity, true, true)
+                                if options.alignToGround then
+                                    AlignEntityToNormal(door2Entity, groundNormal, baseHeading - 90.0)
+                                end
+                            end
+                            
+                            if DoesEntityExist(door1Entity) and DoesEntityExist(door2Entity) then
+                                interiorEnt = { door1Entity, door2Entity }
+                                interiorModelVal = "bazq-sur_mkapi"
+                                isDualDoors = true
+                            end
+                        end
+                    end
+                    
+                    local rot = GetEntityRotation(obj, 2)
+                    local newIndex = #spawnedObjects + 1
+                    spawnedObjects[newIndex] = {
+                        entity = obj,
+                        model = propName,
+                        coords = GetEntityCoords(obj),
+                        heading = GetEntityHeading(obj),
+                        rotation = {x = rot.x, y = rot.y, z = rot.z},
+                        playerName = currentPlacementOptions.playerName or "Unknown",
+                        timestamp = GetRealTimestamp(),
+                        originalIndex = newIndex,
+                        hasDualDoors = isDualDoors,
+                        interiorEntity = interiorEnt,
+                        interiorModel = interiorModelVal
+                    }
+                    
+                    RegisterTargetForEntity(obj)
+                    spawnedCount = spawnedCount + 1
+                    
+                    -- Spawn random decal on top of the wall if it's a concrete wall segment, enabled, and chance rolls success
+                    if propName:match("^bazq%-wall2_wall%d+") and options.enableDecals and options.activeDecals and #options.activeDecals > 0 then
+                        local roll = math.random(1, 100)
+                        local chance = tonumber(options.decalFrequency) or 20
+                        if roll <= chance then
+                            local decalModel = options.activeDecals[math.random(1, #options.activeDecals)]
+                            local decalHash = GetHashKey(decalModel)
+                            if IsModelInCdimage(decalHash) and IsModelValid(decalHash) then
+                                RequestModel(decalHash)
+                                local decalStartTime = GetGameTimer()
+                                while not HasModelLoaded(decalHash) do
+                                    if GetGameTimer() - decalStartTime > 1000 then break end
+                                    Citizen.Wait(10)
+                                end
+                                
+                                if HasModelLoaded(decalHash) then
+                                    local decalObj = CreateObject(decalHash, centerPos.x, centerPos.y, spawnZ, true, true, false)
+                                    if DoesEntityExist(decalObj) then
+                                        SetEntityAsMissionEntity(decalObj, true, true)
+                                        FreezeEntityPosition(decalObj, true)
+                                        SetEntityCollision(decalObj, true, true)
+                                        
+                                        if options.alignToGround then
+                                            AlignEntityToNormal(decalObj, groundNormal, baseHeading)
+                                        else
+                                            SetEntityHeading(decalObj, baseHeading)
+                                        end
+                                        
+                                        local dRot = GetEntityRotation(decalObj, 2)
+                                        local dIndex = #spawnedObjects + 1
+                                        spawnedObjects[dIndex] = {
+                                            entity = decalObj,
+                                            model = decalModel,
+                                            coords = GetEntityCoords(decalObj),
+                                            heading = GetEntityHeading(decalObj),
+                                            rotation = {x = dRot.x, y = dRot.y, z = dRot.z},
+                                            playerName = currentPlacementOptions.playerName or "Unknown",
+                                            timestamp = GetRealTimestamp(),
+                                            originalIndex = dIndex
+                                        }
+                                        RegisterTargetForEntity(decalObj)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                SetModelAsNoLongerNeeded(modelHash)
+            end
+        end
+        
+        -- Apply the user-defined overlap margin (converted from cm to meters) to prevent visible gaps between consecutive walls
+        local overlapVal = 1.5
+        if options and options.overlapMargin ~= nil then
+            overlapVal = tonumber(options.overlapMargin) or 1.5
+        end
+        local overlapMargin = overlapVal / 100.0
+        tempDist = tempDist + propWidth - overlapMargin
+    end
+    
+    if spawnedCount > 0 or spawnTower then
+        SaveObjectsToServer()
+        SendNUIMessage({
+            action = 'updateSpawnedList',
+            data = GetSerializableSpawnedObjects()
+        })
+        SendNUIMessage({
+            action = 'log',
+            message = 'Path Creator: Successfully placed ' .. (spawnedCount + (spawnTower and 1 or 0)) .. ' objects.',
+            type = 'success'
+        })
+        return true, tempDist
+    else
+        SendNUIMessage({
+            action = 'log',
+            message = 'Path Creator: No objects placed (path too short or invalid models).',
+            type = 'warning'
+        })
+        return false, 0.0
+    end
+end
+
+local activePathOptions = nil
+
+local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, options, mode, randomizerProps, customPackageProps)
+    local pointA = nil
+    local pointB = nil
+    local prevDir = nil
+    local hasDrawingFocus = false
+    local lastHit = false
+    local lastHitCoords = vector3(0.0, 0.0, 0.0)
+    activePathOptions = options
+    
+    SendNUIMessage({
+        action = 'log',
+        message = 'Entered Path Creator. Left Click: Set Point A/B. Right Click/ESC: Exit.',
+        type = 'info'
+    })
+    
+    SendNUIMessage({
+        action = 'editingModeUpdate',
+        message = "PATH DRAWING: Aim & Left Click to set Point A. Right Click/ESC: Exit.",
+        editingActive = true
+    })
+    
+    local playerPed = PlayerPedId()
+    SetPedCanSwitchWeapon(playerPed, false)
+    DisablePlayerFiring(PlayerId(), true)
+    
+    -- Wait 500ms to prevent NUI click propagation into the placement loop
+    Citizen.Wait(500)
+    
+    while pathDrawing do
+        Citizen.Wait(0)
+        
+        DisableControlAction(0, 24, true)
+        DisableControlAction(0, 25, true)
+        DisableControlAction(0, 322, true)
+        DisableControlAction(0, 200, true)
+        DisableControlAction(0, 19, true) -- Prevent Character Wheel (Left ALT)
+        DisableControlAction(0, 73, true) -- Prevent Duck/Look Behind (X Key)
+        
+        -- Hold Left ALT (Control 19) to show mouse and change settings in UI
+        local isAltPressed = IsDisabledControlPressed(0, 19)
+        if isAltPressed then
+            if not hasDrawingFocus then
+                hasDrawingFocus = true
+                SetNuiFocus(true, true)
+            end
+        else
+            if hasDrawingFocus then
+                hasDrawingFocus = false
+                SetNuiFocus(false, false)
+            end
+        end
+        
+        -- Press X (Control 73) to toggle Axis Snapping (90° Snap) in-game
+        if IsDisabledControlJustReleased(0, 73) then
+            options.axisLock = not options.axisLock
+            SendNUIMessage({
+                action = 'updateAxisLockCheckbox',
+                state = options.axisLock
+            })
+        end
+        
+        local hit, hitCoords = false, nil
+        if not hasDrawingFocus then
+            local rHit, rCoords = RaycastFromCamera()
+            if rHit then
+                hit = true
+                hitCoords = rCoords
+                lastHit = true
+                lastHitCoords = rCoords
+            end
+        else
+            hit = lastHit
+            hitCoords = lastHitCoords
+        end
+        
+        if hit and pointA and options.axisLock then
+            local rawDir = hitCoords - pointA
+            local dist = #(rawDir)
+            if dist > 0.1 then
+                local angleCursor = math.atan2(-rawDir.x, rawDir.y)
+                local snappedAngle = 0.0
+                if prevDir then
+                    local anglePrev = math.atan2(-prevDir.x, prevDir.y)
+                    local relativeAngle = angleCursor - anglePrev
+                    
+                    while relativeAngle > math.pi do relativeAngle = relativeAngle - 2 * math.pi end
+                    while relativeAngle < -math.pi do relativeAngle = relativeAngle + 2 * math.pi end
+                    
+                    local snappedRelative = math.floor((relativeAngle + math.rad(45)) / math.rad(90)) * math.rad(90)
+                    snappedAngle = anglePrev + snappedRelative
+                else
+                    snappedAngle = math.floor((angleCursor + math.rad(45)) / math.rad(90)) * math.rad(90)
+                end
+                local snappedDir = vector3(-math.sin(snappedAngle), math.cos(snappedAngle), 0.0)
+                hitCoords = pointA + snappedDir * dist
+            end
+        end
+        
+        -- Render cyan snapping grid on the terrain
+        if options.axisLock and pointA then
+            local spacing = customWidth or 1.0
+            if isPackage then
+                local pkgData = Config.PathCreator.packages[selectedItem]
+                spacing = (pkgData and type(pkgData) == "table" and pkgData.width) or 1.0
+            else
+                spacing = Config.PathCreator.props[selectedItem] or customWidth or 1.0
+            end
+            
+            local gridHeading = 0.0
+            if prevDir then
+                gridHeading = math.atan2(-prevDir.x, prevDir.y)
+            end
+            
+            local rightDir = vector3(-math.sin(gridHeading + math.rad(90)), math.cos(gridHeading + math.rad(90)), 0.0)
+            local fwdDir = vector3(-math.sin(gridHeading), math.cos(gridHeading), 0.0)
+            
+            for i = -10, 10 do
+                local offsetR = rightDir * (i * spacing)
+                local startP = pointA + offsetR - fwdDir * (10 * spacing)
+                local endP = pointA + offsetR + fwdDir * (10 * spacing)
+                
+                local success1, z1 = GetGroundZFor_3dCoord(startP.x, startP.y, pointA.z + 10.0, false)
+                local success2, z2 = GetGroundZFor_3dCoord(endP.x, endP.y, pointA.z + 10.0, false)
+                local drawZ1 = success1 and z1 or startP.z
+                local drawZ2 = success2 and z2 or endP.z
+                
+                DrawLine(startP.x, startP.y, drawZ1 + 0.1, endP.x, endP.y, drawZ2 + 0.1, 0, 180, 255, 60)
+                
+                local offsetF = fwdDir * (i * spacing)
+                local startP2 = pointA + offsetF - rightDir * (10 * spacing)
+                local endP2 = pointA + offsetF + rightDir * (10 * spacing)
+                
+                local success1_2, z1_2 = GetGroundZFor_3dCoord(startP2.x, startP2.y, pointA.z + 10.0, false)
+                local success2_2, z2_2 = GetGroundZFor_3dCoord(endP2.x, endP2.y, pointA.z + 10.0, false)
+                local drawZ1_2 = success1_2 and z1_2 or startP2.z
+                local drawZ2_2 = success2_2 and z2_2 or endP2.z
+                
+                DrawLine(startP2.x, startP2.y, drawZ1_2 + 0.1, endP2.x, endP2.y, drawZ2_2 + 0.1, 0, 180, 255, 60)
+            end
+        end
+        
+        if pointA then
+            DrawMarker(28, pointA.x, pointA.y, pointA.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 255, 120, 0, 200, false, true, 2, nil, nil, false)
+            
+            if hit then
+                DrawLine(pointA.x, pointA.y, pointA.z + 0.1, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0, 255, 0, 255)
+                DrawMarker(28, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0, 255, 0, 200, false, true, 2, nil, nil, false)
+                
+                local dist = #(hitCoords - pointA)
+                local dir = (hitCoords - pointA) / dist
+                local tempDist = 0.0
+                
+                local pathHeading = math.deg(math.atan2(dir.x, dir.y))
+                
+                local segmentIndex = 1
+                while tempDist < dist do
+                    local width = customWidth
+                    
+                    if mode == "multi" then
+                        local seed = math.floor(pointA.x * 100) + math.floor(pointA.y * 100) + segmentIndex * 17
+                        local randVal = (math.abs(seed) % 100) + 1
+                        local selectedProp = nil
+                        local currentSum = 0
+                        for _, p in ipairs(randomizerProps) do
+                            currentSum = currentSum + (tonumber(p.weight) or 0)
+                            if randVal <= currentSum then
+                                selectedProp = p
+                                break
+                            end
+                        end
+                        if not selectedProp and #randomizerProps > 0 then
+                            selectedProp = randomizerProps[1]
+                        end
+                        width = selectedProp and tonumber(selectedProp.width) or customWidth
+                    elseif isPackage then
+                        local pkgData = Config.PathCreator.packages[selectedItem]
+                        width = (type(pkgData) == "table" and pkgData.width) or pkgData or 1.0
+                    else
+                        width = Config.PathCreator.props[selectedItem] or customWidth
+                    end
+                    
+                    if tempDist + width > dist then
+                        break
+                    end
+                    
+                    local centerPos = pointA + dir * (tempDist + width / 2)
+                    local spawnZ = centerPos.z
+                    
+                    if options.snapToGround then
+                        local hitVal, gZ = GetGroundZFor_3dCoord(centerPos.x, centerPos.y, centerPos.z + 10.0, false)
+                        if hitVal then
+                            spawnZ = gZ
+                        end
+                    end
+                    
+                    DrawMarker(1, centerPos.x, centerPos.y, spawnZ, 0.0, 0.0, 0.0, 0.0, 0.0, pathHeading, width, 0.2, 0.5, 0, 255, 0, 80, false, true, 2, nil, nil, false)
+                    
+                    tempDist = tempDist + width
+                    segmentIndex = segmentIndex + 1
+                    if segmentIndex > 100 then break end
+                end
+            end
+        else
+            if hit then
+                DrawMarker(28, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0, 120, 255, 200, false, true, 2, nil, nil, false)
+            end
+        end
+        
+        if IsDisabledControlJustReleased(0, 24) and hit and not hasDrawingFocus then
+            if not pointA then
+                pointA = hitCoords
+                SendNUIMessage({
+                    action = 'editingModeUpdate',
+                    message = "PATH DRAWING: Point A set. Left Click to set Point B and build walls.",
+                    editingActive = true
+                })
+            else
+                pointB = hitCoords
+                local dist = #(pointB - pointA)
+                if dist >= 0.1 then
+                    local dir = (pointB - pointA) / dist
+                    
+                    -- Check if corner tower is needed (angle change close to options.cornerAngle)
+                    local spawnTower = false
+                    if options.cornerTowers and prevDir then
+                        local dot = prevDir.x * dir.x + prevDir.y * dir.y + prevDir.z * dir.z
+                        dot = math.max(-1.0, math.min(1.0, dot))
+                        local angleChange = math.abs(math.deg(math.acos(dot)))
+                        
+                        local targetAngle = tonumber(options.cornerAngle) or 90.0
+                        if math.abs(angleChange - targetAngle) <= 30.0 then
+                            spawnTower = true
+                        end
+                    end
+                    
+                    local success, actualPlacedDist = BuildPathProps(pointA, pointB, selectedItem, isPackage, customWidth, options, mode, randomizerProps, spawnTower, prevDir, customPackageProps)
+                    if success then
+                        prevDir = dir
+                        pointA = pointA + dir * actualPlacedDist
+                        pointB = nil
+                    else
+                        pointB = nil
+                    end
+                else
+                    pointB = nil
+                end
+            end
+        end
+        
+        if (IsDisabledControlJustReleased(0, 25) or IsDisabledControlJustReleased(0, 322) or IsDisabledControlJustReleased(0, 200)) and not hasDrawingFocus then
+            pathDrawing = false
+            break
+        end
+    end
+    
+    pathDrawing = false
+    activePathOptions = nil
+    SetPedCanSwitchWeapon(playerPed, true)
+    DisablePlayerFiring(PlayerId(), false)
+    
+    SendNUIMessage({action = 'editingModeUpdate', editingActive = false})
+    SendNUIMessage({action = 'exitDrawingMode'})
+    
+    SetNuiFocus(true, true)
+    isMenuOpen = true
+    OpenNUIMenu()
+end
+
+RegisterNUICallback('updateDrawingOptions', function(data, cb)
+    if pathDrawing and activePathOptions then
+        for k, v in pairs(data) do
+            activePathOptions[k] = v
+        end
+    end
+    cb('ok')
+end)
+
+RegisterNUICallback('startPathDrawing', function(data, cb)
+    if placing or editingObjectData then
+        SendNUIMessage({action = 'showError', message = "Finish placement/editing before drawing paths."})
+        cb({status = 'error'}); return
+    end
+    
+    local model = data.model
+    local customWidth = tonumber(data.width) or 1.0
+    local options = data.options or {}
+    local mode = data.mode or "single"
+    local randomizerProps = data.randomizerProps or {}
+    local customPackageProps = data.customPackageProps or {}
+    
+    local isPackage = false
+    if mode == "single" then
+        if model == "bazq-wall3" then
+            model = "wall3"
+        end
+        if Config.PathCreator.packages[model] then
+            isPackage = true
+        end
+    end
+    
+    pathDrawing = true
+    SendNUIMessage({action = 'enterDrawingMode'})
+    SetNuiFocus(false, false)
+    isMenuOpen = false
+    
+    Citizen.CreateThread(function()
+        StartPathDrawingLoop(model, isPackage, customWidth, options, mode, randomizerProps, customPackageProps)
+    end)
+    
+    cb('ok')
 end)
 
 RegisterNUICallback('updateUser', function(data, cb)
@@ -2979,12 +4268,7 @@ AddEventHandler("bazq-objectplace:receiveUserSettings", function(userSettings)
     isMenuOpen = true
     
     -- Send UI data and wait for ready callback
-    SendNUIMessage({
-        action = 'open',
-        objects = objectList,
-        spawnedObjectsForList = GetSerializableSpawnedObjects(),
-        userSettings = userSettings
-    })
+    OpenNUIMenu()
     DebugLog("MENU", "Sent open message to UI with " .. #objectList .. " objects")
     DebugLog("MENU", "Menu should now be open - isMenuOpen:" .. tostring(isMenuOpen) .. " IsNuiFocused:" .. tostring(IsNuiFocused()))
     
@@ -3066,13 +4350,10 @@ Citizen.CreateThread(function()
     TriggerServerEvent("bazq-objectplace:requestResourceInfo")
 end)
 
--- Disable controls when menu is open or during object placement/editing
+-- Disable controls when menu is open or during object placement/editing/path drawing
 Citizen.CreateThread(function()
     while true do
-        Citizen.Wait(0)
-        
-        -- Check if controls should be disabled (removed isFreecamActive to allow key detection)
-        local shouldDisable = isMenuOpen or placing or editingObjectData ~= nil
+        local shouldDisable = isMenuOpen or placing or editingObjectData ~= nil or pathDrawing == true
         
         if shouldDisable then
             -- Disable primary combat controls
@@ -3125,14 +4406,16 @@ Citizen.CreateThread(function()
             -- Update control disabled state
             if not isControlsDisabled then
                 isControlsDisabled = true
-                DebugLog("GENERAL", "Combat controls disabled - Menu: " .. tostring(isMenuOpen) .. ", Placing: " .. tostring(placing) .. ", Editing: " .. tostring(editingObjectData ~= nil))
+                DebugLog("GENERAL", "Combat controls disabled - Menu: " .. tostring(isMenuOpen) .. ", Placing: " .. tostring(placing) .. ", Editing: " .. tostring(editingObjectData ~= nil) .. ", Path: " .. tostring(pathDrawing))
             end
+            Citizen.Wait(0)
         else
             -- Re-enable controls
             if isControlsDisabled then
                 isControlsDisabled = false
                 DebugLog("GENERAL", "Combat controls enabled")
             end
+            Citizen.Wait(500) -- Sleep for 500ms when not active to save CPU cycles
         end
     end
 end)
@@ -3255,69 +4538,30 @@ end)
 -- TESTZONE SYSTEM IMPLEMENTATION
 -- ================================
 
--- Debug and Test Zone Configuration
--- debugConfig already declared at top of file - don't redeclare!
 local isInTestZone = false
 local testZoneCheckInterval = 5000 -- Check every 5 seconds
 
--- Load debug configuration
-function LoadDebugConfig()
-    local configFile = LoadResourceFile(GetCurrentResourceName(), "debug_config.lua")
-    if configFile then
-        local chunk, err = load(configFile)
-        if chunk then
-            local success, config = pcall(chunk)
-            if success and config then
-                debugConfig = config
-                DebugLog("GENERAL", "Debug config loaded - TestZone: " .. (config.testZone.enabled and "ENABLED" or "DISABLED"))
-                if config.testZone.enabled then
-                    DebugLog("GENERAL", string.format("TestZone center: %.1f, %.1f, %.1f (radius: %.1fm)", 
-                        config.testZone.center.x, config.testZone.center.y, config.testZone.center.z, config.testZone.radius))
-                end
-                if config.userManagement then
-                    DebugLog("USER", string.format("TestZone UserManagement config - AutoPromote: %s", tostring(config.userManagement.autoPromoteFirstUser)))
-                end
-                return true
-            else
-                DebugLog("GENERAL", "ERROR: Failed to execute debug config: " .. tostring(config))
-            end
-        else
-            DebugLog("GENERAL", "ERROR: Failed to load debug config: " .. tostring(err))
-        end
-    else
-        DebugLog("GENERAL", "WARNING: debug_config.lua not found, using defaults")
-    end
-    
-    -- Default config
-    debugConfig = {
-        enabled = false,
-        testZone = { enabled = false },
-        userManagement = { autoPromoteFirstUser = false, requireApproval = false }
-    }
-    return false
-end
-
 -- Check if player is in test zone
 function IsPlayerInTestZone()
-    if not debugConfig or not debugConfig.testZone or not debugConfig.testZone.enabled then
+    if not Config.TestZone or not Config.TestZone.enabled then
         DebugLog("GENERAL", "TestZone not enabled or config missing")
         return false
     end
     
-    if not debugConfig.testZone.center then
+    if not Config.TestZone.center then
         DebugLog("GENERAL", "TestZone center coordinates missing!")
         return false
     end
     
     local playerPed = PlayerPedId()
     local playerPos = GetEntityCoords(playerPed)
-    local center = debugConfig.testZone.center
-    local radius = debugConfig.testZone.radius or 100.0
+    local center = Config.TestZone.center
+    local radius = Config.TestZone.radius or 100.0
     
     local distance = #(vector3(playerPos.x, playerPos.y, playerPos.z) - vector3(center.x, center.y, center.z))
     
-    -- Only log if specific debug level is enabled
-    if debugConfig and debugConfig.levels and debugConfig.levels.TESTZONE then
+    -- Only log if debug is enabled
+    if Config.Debug then
         DebugLog("GENERAL", string.format("TestZone check - Distance: %.1fm, Radius: %.1fm, InZone: %s", 
             distance, radius, distance <= radius and "YES" or "NO"))
     end
@@ -3327,12 +4571,10 @@ end
 
 -- TestZone monitoring thread - ENABLED for auto menu control
 CreateThread(function()
-    LoadDebugConfig()
-    
-    -- Wait a bit for config to load properly
+    -- Wait a bit for resource initialization
     Wait(2000)
     
-    if not debugConfig or not debugConfig.testZone or not debugConfig.testZone.enabled then
+    if not Config.TestZone or not Config.TestZone.enabled then
         DebugLog("GENERAL", "TestZone disabled, monitoring thread stopped")
         return
     end
@@ -3354,7 +4596,7 @@ CreateThread(function()
             })
             
             -- Show TestZone Controls UI instead of auto-opening menu
-            if debugConfig.testZone.showControlsUI then
+            if Config.TestZone.showControlsUI then
                 DebugLog("MENU", "Showing TestZone controls UI")
                 SendNUIMessage({
                     action = 'showTestZoneUI',
@@ -3371,7 +4613,7 @@ CreateThread(function()
             })
             
             -- Hide TestZone Controls UI
-            if debugConfig.testZone.showControlsUI then
+            if Config.TestZone.showControlsUI then
                 DebugLog("MENU", "Hiding TestZone controls UI")
                 SendNUIMessage({
                     action = 'showTestZoneUI',
@@ -3390,11 +4632,11 @@ CreateThread(function()
         Wait(0) -- Check every frame for responsive controls
         
         -- Only run special controls if we're in TestZone and it's enabled
-        if debugConfig and debugConfig.testZone and debugConfig.testZone.enabled and 
-           debugConfig.testZone.specialControls and debugConfig.testZone.specialControls.enabled and
+        if Config.TestZone and Config.TestZone.enabled and 
+           Config.TestZone.specialControls and Config.TestZone.specialControls.enabled and
            IsPlayerInTestZone() then
            
-            local controls = debugConfig.testZone.specialControls
+            local controls = Config.TestZone.specialControls
             
             -- Quick Spawn (INSERT key)
             if IsControlJustPressed(0, controls.quickSpawn or 121) then
@@ -3641,7 +4883,7 @@ RegisterCommand('bazq_testzone_f7', function()
     end
     
     -- Check if player is in TestZone
-    if not (debugConfig and debugConfig.testZone and debugConfig.testZone.enabled) then
+    if not (Config.TestZone and Config.TestZone.enabled) then
         TriggerEvent('chat:addMessage', {
             color = { 239, 68, 68 },
             args = { "[bazq-os]", "🔒 TestZone is not enabled!" }
@@ -3717,12 +4959,10 @@ RegisterKeyMapping('bazq_f6', 'Toggle bazq Freecam (Noclip)', 'keyboard', 'F6')
 -- Debug F6 command
 RegisterCommand('debugf6', function()
     DebugLog("FREECAM", "========== F6 DEBUG ==========")
-    DebugLog("FREECAM", "debugConfig exists: " .. tostring(debugConfig ~= nil))
-    DebugLog("FREECAM", "debugConfig memory address: " .. tostring(debugConfig))
-    DebugLog("FREECAM", "debugConfig.testZone address: " .. tostring(debugConfig and debugConfig.testZone))
-    if debugConfig and debugConfig.testZone then
-        DebugLog("FREECAM", "testZone.enabled: " .. tostring(debugConfig.testZone.enabled))
-        if debugConfig.testZone.enabled then
+    DebugLog("FREECAM", "Config.TestZone exists: " .. tostring(Config.TestZone ~= nil))
+    if Config.TestZone then
+        DebugLog("FREECAM", "Config.TestZone.enabled: " .. tostring(Config.TestZone.enabled))
+        if Config.TestZone.enabled then
             DebugLog("FREECAM", "🟢 TestZone IS ENABLED - should grant global F6 access")
         else
             DebugLog("FREECAM", "🔴 TestZone IS DISABLED - will check admin permissions")
@@ -3740,34 +4980,32 @@ end, false)
 RegisterCommand('debugf7', function()
     DebugLog("MENU", "========== ENHANCED F7 DEBUG ==========")
     
-    -- Check debug config loading
-    DebugLog("MENU", "1. debugConfig exists: " .. tostring(debugConfig ~= nil))
-    if debugConfig then
-        DebugLog("MENU", "2. debugConfig.testZone exists: " .. tostring(debugConfig.testZone ~= nil))
-        if debugConfig.testZone then
-            DebugLog("MENU", "3. testZone.enabled: " .. tostring(debugConfig.testZone.enabled))
-            DebugLog("MENU", "4. testZone.center exists: " .. tostring(debugConfig.testZone.center ~= nil))
-            if debugConfig.testZone.center then
-                local center = debugConfig.testZone.center
-                DebugLog("MENU", string.format("5. Center: x=%.2f, y=%.2f, z=%.2f", center.x, center.y, center.z))
-                DebugLog("MENU", "6. testZone.radius: " .. tostring(debugConfig.testZone.radius))
-                
-                -- Check player position and distance
-                local playerPed = PlayerPedId()
-                local playerPos = GetEntityCoords(playerPed)
-                DebugLog("MENU", string.format("7. Player: x=%.2f, y=%.2f, z=%.2f", playerPos.x, playerPos.y, playerPos.z))
-                
-                local distance = #(vector3(playerPos.x, playerPos.y, playerPos.z) - vector3(center.x, center.y, center.z))
-                DebugLog("MENU", string.format("8. Distance to center: %.2f meters", distance))
-                DebugLog("MENU", string.format("9. Required radius: %.2f meters", debugConfig.testZone.radius))
-                DebugLog("MENU", string.format("10. In zone calculation: %s", tostring(distance <= debugConfig.testZone.radius)))
-            end
+    -- Check config
+    DebugLog("MENU", "1. Config.TestZone exists: " .. tostring(Config.TestZone ~= nil))
+    if Config.TestZone then
+        DebugLog("MENU", "2. Config.TestZone.enabled: " .. tostring(Config.TestZone.enabled))
+        DebugLog("MENU", "3. Config.TestZone.center exists: " .. tostring(Config.TestZone.center ~= nil))
+        if Config.TestZone.center then
+            local center = Config.TestZone.center
+            DebugLog("MENU", string.format("4. Center: x=%.2f, y=%.2f, z=%.2f", center.x, center.y, center.z))
+            DebugLog("MENU", "5. Config.TestZone.radius: " .. tostring(Config.TestZone.radius))
+            
+            -- Check player position and distance
+            local playerPed = PlayerPedId()
+            local playerPos = GetEntityCoords(playerPed)
+            DebugLog("MENU", string.format("6. Player: x=%.2f, y=%.2f, z=%.2f", playerPos.x, playerPos.y, playerPos.z))
+            
+            local distance = #(vector3(playerPos.x, playerPos.y, playerPos.z) - vector3(center.x, center.y, center.z))
+            local radius = Config.TestZone.radius or 100.0
+            DebugLog("MENU", string.format("7. Distance to center: %.2f meters", distance))
+            DebugLog("MENU", string.format("8. Required radius: %.2f meters", radius))
+            DebugLog("MENU", string.format("9. In zone calculation: %s", tostring(distance <= radius)))
         end
     end
     
     -- Test zone check function
     local inZone = IsPlayerInTestZone()
-    DebugLog("MENU", "11. IsPlayerInTestZone() result: " .. tostring(inZone))
+    DebugLog("MENU", "10. IsPlayerInTestZone() result: " .. tostring(inZone))
     
     DebugLog("MENU", "========== END F7 DEBUG ==========")
 end, false)

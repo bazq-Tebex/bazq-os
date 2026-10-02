@@ -9,195 +9,15 @@ local function dbg(msg)
     end
 end
 
--- Compatibility wrappers for existing code
-local function DebugUser(msg) dbg(msg) end
-local function DebugSave(msg) dbg(msg) end
-local function DebugLoading(msg) dbg(msg) end
-local function DebugGeneral(msg) dbg(msg) end
-local function DebugLog(_, msg) dbg(msg) end
-local function DebugPrint(_, msg) dbg(msg) end
-local function OPLog(message)
-    -- Remove old prefix if present
-    local cleanMsg = message:gsub("%[ObjectPlacer%] SERVER[:%s]*", "")
-    cleanMsg = cleanMsg:gsub("%[ObjectPlacer%] ", "")
-    dbg(cleanMsg)
-end
-
-local function IsInTestZone(coords)
-    if not Config.TestZone.enabled then return false end
-    if not coords then return false end
-    local dx = coords.x - (Config.TestZone.center.x or 0.0)
-    local dy = coords.y - (Config.TestZone.center.y or 0.0)
-    local dz = coords.z - (Config.TestZone.center.z or 0.0)
-    local distSq = dx*dx + dy*dy + dz*dz
-    return distSq <= (Config.TestZone.radius or 0.0)^2
-end
-
 -- ================================
--- TESTZONE F7 PERMISSION SYSTEM  
--- ================================
--- (Will be registered after GetPlayerPrimaryIdentifier function is defined)
-
--- ================================
--- TESTZONE AUTO-CLEANUP SYSTEM
--- ================================
-
--- Enhanced player disconnect handler for TestZone cleanup
-AddEventHandler('playerDropped', function(reason)
-    local src = source
-    local playerName = GetPlayerName(src)
-    
-    dbg(string.format("Player %s disconnected (reason: %s)", playerName, reason))
-    
-    -- TestZone auto-cleanup
-    if Config.TestZone.enabled and Config.TestZone.cleanupOnDisconnect and playerPlacedObjects[src] then
-        local objectsToDelete = playerPlacedObjects[src]
-        local deletedCount = 0
-        
-        dbg(string.format("🧹 TestZone cleanup: Removing %d objects from %s", #objectsToDelete, playerName))
-        
-        -- Remove objects from savedObjects
-        for i = #savedObjects, 1, -1 do
-            local obj = savedObjects[i]
-            for _, playerObj in ipairs(objectsToDelete) do
-                if obj.coords and playerObj.coords and 
-                   math.abs(obj.coords.x - playerObj.coords.x) < 0.1 and
-                   math.abs(obj.coords.y - playerObj.coords.y) < 0.1 and
-                   math.abs(obj.coords.z - playerObj.coords.z) < 0.1 then
-                    table.remove(savedObjects, i)
-                    deletedCount = deletedCount + 1
-                    break
-                end
-            end
-        end
-        
-        -- Save updated objects to file
-        if deletedCount > 0 then
-            SaveObjectsToFile()
-            dbg(string.format("🧹 TestZone cleanup complete: Deleted %d/%d objects from %s", 
-                deletedCount, #objectsToDelete, playerName))
-            
-            -- Notify all clients to update their lists
-            TriggerClientEvent('bazq-objectplace:objectsUpdated', -1, savedObjects)
-        end
-    end
-    
-    -- Clear player tracking unconditionally to prevent memory leaks
-    if playerPlacedObjects[src] then
-        playerPlacedObjects[src] = nil
-    end
-end)
-
--- Track per-player placed objects for optional cleanup
-local playerPlacedObjects = {}
-
-local function TrackPlayerObjects(src, objects)
-    if not Config.TestZone.enabled or not Config.TestZone.cleanupOnDisconnect then return end
-    if type(objects) ~= "table" then return end
-    playerPlacedObjects[src] = {}
-    for _, obj in ipairs(objects) do
-        table.insert(playerPlacedObjects[src], obj)
-    end
-end
-
--- ================================
--- SCRIPT CONFIGURATION
+-- SCRIPT CONFIGURATION & STATE
 -- ================================
 
 local jsonFilePath = GetResourcePath(GetCurrentResourceName()) .. "/saved_objects.json"
 local osAdminFilePath = GetResourcePath(GetCurrentResourceName()) .. "/osadmin.json"
 local savedObjects = {} -- In-memory cache of saved objects
 local osAdminData = {} -- In-memory cache of osadmin data
-
-
-
--- Load objects from JSON file (on server start)
-local function LoadObjectsFromFile()
-    local fileContent = LoadResourceFile(GetCurrentResourceName(), "saved_objects.json")
-    if fileContent and fileContent ~= "" then
-        local success, decodedObjects = pcall(json.decode, fileContent)
-        if success and type(decodedObjects) == "table" then
-            savedObjects = decodedObjects
-        else
-            OPLog("[ObjectPlacer] SERVER ERROR: Failed to decode saved_objects.json or it's not a table. Content: " .. tostring(fileContent))
-            savedObjects = {}
-        end
-    else
-        OPLog("[ObjectPlacer] SERVER INFO: saved_objects.json not found or empty. Starting with no saved objects.")
-        savedObjects = {}
-    end
-end
-
--- Load osadmin data from JSON file (supports both old and new formats)
-local function LoadOsAdminFromFile()
-    local fileContent = LoadResourceFile(GetCurrentResourceName(), "osadmin.json")
-    if fileContent and fileContent ~= "" then
-        local success, decodedData = pcall(json.decode, fileContent)
-        if success and type(decodedData) == "table" then
-            -- Check if this is the new readable format
-            if decodedData.userManagement then
-                OPLog("[ObjectPlacer] SERVER INFO: Loading new format osadmin.json")
-                osAdminData = {
-                    userManagement = decodedData.userManagement,
-                    admins = decodedData.admins or {}, -- Keep legacy for compatibility
-                    settings = decodedData.settings or {},
-                    version = decodedData.version or "2.2.0",
-                    last_updated = decodedData.last_updated
-                }
-            else
-                -- Old format - migrate to new structure
-                OPLog("[ObjectPlacer] SERVER INFO: Migrating old format osadmin.json to new structure")
-                osAdminData = decodedData
-                if not osAdminData.userManagement then
-                    osAdminData.userManagement = {
-                        users = {},
-                        settings = {
-                            autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
-                            requireApproval = Config.UserManagement.requireApproval or false
-                        }
-                    }
-                    DebugPrint("USER", string.format("UserManagement initialized from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
-                end
-            end
-        else
-            OPLog("[ObjectPlacer] SERVER ERROR: Failed to decode osadmin.json or it's not a table.")
-            
-            osAdminData = {
-                userManagement = {
-                    users = {},
-                    settings = {
-                        autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
-                        requireApproval = Config.UserManagement.requireApproval or false
-                    }
-                },
-                admins = {},
-                settings = {},
-                version = "2.2.0",
-                last_updated = os.date("%Y-%m-%d %H:%M:%S")
-            }
-            DebugPrint("USER", string.format("UserManagement created from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
-        end
-    else
-        OPLog("[ObjectPlacer] SERVER INFO: osadmin.json not found. Creating default structure with example owner.")
-        
-        osAdminData = {
-            userManagement = {
-                users = {},
-                settings = {
-                    autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
-                    requireApproval = Config.UserManagement.requireApproval or false
-                }
-            },
-            admins = {},
-            settings = {},
-            version = "2.10",
-            last_updated = os.date("%Y-%m-%d %H:%M:%S")
-        }
-        DebugPrint("USER", string.format("New osadmin.json created from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
-        -- Save the default structure immediately
-        SaveOsAdminToFile()
-    end
-end
+local playerPlacedObjects = {} -- Track per-player placed objects for optional cleanup
 
 -- Helper to format JSON (Pretty Print)
 local function FormatJson(json_str)
@@ -291,7 +111,7 @@ local function SaveOsAdminToFile()
             OPLog("[ObjectPlacer] SERVER INFO: Successfully saved user management data")
         end
     else
-        print("[ObjectPlacer] SERVER ERROR: Failed to encode osadmin data to JSON. Error: " .. tostring(encodedData))
+        dbg("SERVER ERROR: Failed to encode osadmin data to JSON. Error: " .. tostring(encodedData))
     end
 end
 
@@ -339,6 +159,163 @@ local function SaveObjectsToFile()
     end
 end
 
+-- Load objects from JSON file (on server start)
+local function LoadObjectsFromFile()
+    local fileContent = LoadResourceFile(GetCurrentResourceName(), "saved_objects.json")
+    if fileContent and fileContent ~= "" then
+        local success, decodedObjects = pcall(json.decode, fileContent)
+        if success and type(decodedObjects) == "table" then
+            savedObjects = decodedObjects
+        else
+            OPLog("[ObjectPlacer] SERVER ERROR: Failed to decode saved_objects.json or it's not a table. Content: " .. tostring(fileContent))
+            savedObjects = {}
+        end
+    else
+        OPLog("[ObjectPlacer] SERVER INFO: saved_objects.json not found or empty. Starting with no saved objects.")
+        savedObjects = {}
+    end
+end
+
+-- Load osadmin data from JSON file (supports both old and new formats)
+local function LoadOsAdminFromFile()
+    local fileContent = LoadResourceFile(GetCurrentResourceName(), "osadmin.json")
+    if fileContent and fileContent ~= "" then
+        local success, decodedData = pcall(json.decode, fileContent)
+        if success and type(decodedData) == "table" then
+            -- Check if this is the new readable format
+            if decodedData.userManagement then
+                OPLog("[ObjectPlacer] SERVER INFO: Loading new format osadmin.json")
+                osAdminData = {
+                    userManagement = decodedData.userManagement,
+                    admins = decodedData.admins or {}, -- Keep legacy for compatibility
+                    settings = decodedData.settings or {},
+                    version = decodedData.version or "2.2.0",
+                    last_updated = decodedData.last_updated
+                }
+            else
+                -- Old format - migrate to new structure
+                OPLog("[ObjectPlacer] SERVER INFO: Migrating old format osadmin.json to new structure")
+                osAdminData = decodedData
+                if not osAdminData.userManagement then
+                    osAdminData.userManagement = {
+                        users = {},
+                        settings = {
+                            autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
+                            requireApproval = Config.UserManagement.requireApproval or false
+                        }
+                    }
+                    DebugPrint("USER", string.format("UserManagement initialized from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
+                end
+            end
+        else
+            OPLog("[ObjectPlacer] SERVER ERROR: Failed to decode osadmin.json or it's not a table.")
+            
+            osAdminData = {
+                userManagement = {
+                    users = {},
+                    settings = {
+                        autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
+                        requireApproval = Config.UserManagement.requireApproval or false
+                    }
+                },
+                admins = {},
+                settings = {},
+                version = "2.2.0",
+                last_updated = os.date("%Y-%m-%d %H:%M:%S")
+            }
+            DebugPrint("USER", string.format("UserManagement created from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
+        end
+    else
+        OPLog("[ObjectPlacer] SERVER INFO: osadmin.json not found. Creating default structure with example owner.")
+        
+        osAdminData = {
+            userManagement = {
+                users = {},
+                settings = {
+                    autoPromoteFirstUser = Config.UserManagement.autoPromoteFirstUser or false,
+                    requireApproval = Config.UserManagement.requireApproval or false
+                }
+            },
+            admins = {},
+            settings = {},
+            version = "2.10",
+            last_updated = os.date("%Y-%m-%d %H:%M:%S")
+        }
+        DebugPrint("USER", string.format("New osadmin.json created from config - AutoPromote: %s", tostring(Config.UserManagement.autoPromoteFirstUser)))
+        -- Save the default structure immediately
+        SaveOsAdminToFile()
+    end
+end
+
+local function IsInTestZone(coords)
+    if not Config.TestZone.enabled then return false end
+    if not coords then return false end
+    local dx = coords.x - (Config.TestZone.center.x or 0.0)
+    local dy = coords.y - (Config.TestZone.center.y or 0.0)
+    local dz = coords.z - (Config.TestZone.center.z or 0.0)
+    local distSq = dx*dx + dy*dy + dz*dz
+    return distSq <= (Config.TestZone.radius or 0.0)^2
+end
+
+local function TrackPlayerObjects(src, objects)
+    if not Config.TestZone.enabled or not Config.TestZone.cleanupOnDisconnect then return end
+    if type(objects) ~= "table" then return end
+    playerPlacedObjects[src] = {}
+    for _, obj in ipairs(objects) do
+        table.insert(playerPlacedObjects[src], obj)
+    end
+end
+
+-- ================================
+-- TESTZONE AUTO-CLEANUP SYSTEM
+-- ================================
+
+-- Enhanced player disconnect handler for TestZone cleanup
+AddEventHandler('playerDropped', function(reason)
+    local src = source
+    local playerName = GetPlayerName(src)
+    
+    dbg(string.format("Player %s disconnected (reason: %s)", playerName, reason))
+    
+    -- TestZone auto-cleanup
+    if Config.TestZone.enabled and Config.TestZone.cleanupOnDisconnect and playerPlacedObjects[src] then
+        local objectsToDelete = playerPlacedObjects[src]
+        local deletedCount = 0
+        
+        dbg(string.format("🧹 TestZone cleanup: Removing %d objects from %s", #objectsToDelete, playerName))
+        
+        -- Remove objects from savedObjects
+        for i = #savedObjects, 1, -1 do
+            local obj = savedObjects[i]
+            for _, playerObj in ipairs(objectsToDelete) do
+                if obj.coords and playerObj.coords and 
+                   math.abs(obj.coords.x - playerObj.coords.x) < 0.1 and
+                   math.abs(obj.coords.y - playerObj.coords.y) < 0.1 and
+                   math.abs(obj.coords.z - playerObj.coords.z) < 0.1 then
+                    table.remove(savedObjects, i)
+                    deletedCount = deletedCount + 1
+                    break
+                end
+            end
+        end
+        
+        -- Save updated objects to file
+        if deletedCount > 0 then
+            SaveObjectsToFile()
+            dbg(string.format("🧹 TestZone cleanup complete: Deleted %d/%d objects from %s", 
+                deletedCount, #objectsToDelete, playerName))
+            
+            -- Notify all clients to update their lists
+            TriggerClientEvent('bazq-objectplace:objectsUpdated', -1, savedObjects)
+        end
+    end
+    
+    -- Clear player tracking unconditionally to prevent memory leaks
+    if playerPlacedObjects[src] then
+        playerPlacedObjects[src] = nil
+    end
+end)
+
 
 
 -- When a new player joins, send them the current list of saved objects
@@ -350,39 +327,6 @@ AddEventHandler('playerJoining', function(source)
             OPLog("[ObjectPlacer] SERVER: Sent " .. #savedObjects .. " saved objects to new player: " .. GetPlayerName(source))
         end
     end)
-end)
-
--- Cleanup player-placed objects on disconnect when test zone cleanup is enabled
-AddEventHandler('playerDropped', function(reason)
-    local src = source
-    if not testZone.enabled or not testZone.cleanupOnDisconnect then return end
-    local playerName = GetPlayerName(src) or ("src:" .. tostring(src))
-    if playerPlacedObjects[src] and #playerPlacedObjects[src] > 0 then
-        -- Remove objects that belong to this player from savedObjects
-        local toRemove = {}
-        for i = #savedObjects, 1, -1 do
-            local sobj = savedObjects[i]
-            -- We can only guess ownership with playerName/timestamp since entities don't have owner ids persisted
-            for _, pobj in ipairs(playerPlacedObjects[src]) do
-                if sobj.model == pobj.model and sobj.timestamp == pobj.timestamp and sobj.playerName == pobj.playerName then
-                    table.insert(toRemove, i)
-                    break
-                end
-            end
-        end
-        -- Remove by indices
-        for _, idx in ipairs(toRemove) do
-            table.remove(savedObjects, idx)
-        end
-        SaveObjectsToFile()
-        OPLog("[ObjectPlacer] SERVER: Cleaned up " .. tostring(#toRemove) .. " objects for disconnected player " .. playerName .. " (test zone)")
-
-        -- Broadcast updated list
-        for _, player in ipairs(GetPlayers()) do
-            TriggerClientEvent("bazq-objectplace:loadObjects", player, savedObjects)
-        end
-    end
-    playerPlacedObjects[src] = nil
 end)
 
 -- Advanced User Management System
@@ -399,13 +343,9 @@ local userManagementData = {
 -- Initialize default users if none exist
 local function InitializeDefaultUsers()
     if not osAdminData.userManagement then
-        -- Get default values from debug config
-        local configAutoPromote = false
-        local configRequireApproval = false
-        if debugConfig and debugConfig.userManagement then
-            configAutoPromote = debugConfig.userManagement.autoPromoteFirstUser or false
-            configRequireApproval = debugConfig.userManagement.requireApproval or false
-        end
+        -- Get default values from config
+        local configAutoPromote = Config.UserManagement and Config.UserManagement.autoPromoteFirstUser or false
+        local configRequireApproval = Config.UserManagement and Config.UserManagement.requireApproval or false
         
         osAdminData.userManagement = {
             users = {},
@@ -515,6 +455,27 @@ local function GetUserRole(identifier)
     return "guest"
 end
 
+-- Legacy admin check function (kept for compatibility)
+local function IsPlayerAdmin(src)
+    local identifier = GetPlayerPrimaryIdentifier(src)
+    local role = GetUserRole(identifier)
+    
+    -- Check new user management system first - all roles (owner, admin, mapper) can access object spawner
+    if role == "owner" or role == "admin" or role == "mapper" then
+        return true
+    end
+    
+    -- Fallback to ACE permissions
+    if IsPlayerAceAllowed(src, "command") or
+       IsPlayerAceAllowed(src, "admin") or
+       IsPlayerAceAllowed(src, "bazq.admin") or
+       IsPlayerAceAllowed(src, "objectplacer.admin") then
+        return true
+    end
+    
+    return false
+end
+
 -- Check if player has permission
 local function HasPermission(src, permission)
     local identifier = GetPlayerPrimaryIdentifier(src)
@@ -532,27 +493,6 @@ local function HasPermission(src, permission)
     -- Legacy admin check for backwards compatibility
     if permission == "admin" then
         return IsPlayerAdmin(src)
-    end
-    
-    return false
-end
-
--- Legacy admin check function (kept for compatibility)
-local function IsPlayerAdmin(src)
-    local identifier = GetPlayerPrimaryIdentifier(src)
-    local role = GetUserRole(identifier)
-    
-    -- Check new user management system first - all roles (owner, admin, mapper) can access object spawner
-    if role == "owner" or role == "admin" or role == "mapper" then
-        return true
-    end
-    
-    -- Fallback to ACE permissions
-    if IsPlayerAceAllowed(src, "command") or
-       IsPlayerAceAllowed(src, "admin") or
-       IsPlayerAceAllowed(src, "bazq.admin") or
-       IsPlayerAceAllowed(src, "objectplacer.admin") then
-        return true
     end
     
     return false
@@ -583,16 +523,24 @@ end)
 RegisterNetEvent("bazq-objectplace:checkF6Permission")
 AddEventHandler("bazq-objectplace:checkF6Permission", function()
     local src = source
-    local playerName = GetPlayerName(src)
+    local playerName = GetPlayerName(src) or "Unknown"
     local identifier = GetPlayerPrimaryIdentifier(src)
     local role = GetUserRole(identifier)
+    
+    -- Owner lock check
+    local lockActive = (osAdminData.settings and osAdminData.settings.lockNonOwners == true)
+    if lockActive and role ~= "owner" then
+        OPLog("[ObjectPlacer] SERVER: F6 freecam access DENIED to " .. playerName .. " - Spawner currently locked by Owner")
+        TriggerClientEvent("bazq-objectplace:f6PermissionResponse", src, false)
+        return
+    end
     
     -- Check if player has freecam permissions (same logic as F7 but simpler response)
     local hasPermission = false
     
     -- Test zone override: allow any user within the configured zone
     local inZone = false
-    if testZone and testZone.enabled then
+    if Config.TestZone and Config.TestZone.enabled then
         local ped = GetPlayerPed(src)
         if ped and ped ~= 0 then
             local coords = GetEntityCoords(ped)
@@ -1162,7 +1110,8 @@ local function GetUserSettingsNew(src)
     local userSettings = {
         username = playerName,
         packages = {"wall_pack_1"}, -- Default: basic wall pack only
-        role = role
+        role = role,
+        lockNonOwners = (osAdminData.settings and osAdminData.settings.lockNonOwners == true)
     }
     
     -- Check if user exists in new system to get display name
@@ -1216,15 +1165,27 @@ end
 RegisterNetEvent("bazq-objectplace:checkAdminPermission")
 AddEventHandler("bazq-objectplace:checkAdminPermission", function()
     local src = source
-    local playerName = GetPlayerName(src)
+    local playerName = GetPlayerName(src) or "Unknown"
     local identifier = GetPlayerPrimaryIdentifier(src)
     local role = GetUserRole(identifier)
+    
+    -- Owner lock check
+    local lockActive = (osAdminData.settings and osAdminData.settings.lockNonOwners == true)
+    if lockActive and role ~= "owner" then
+        OPLog("[ObjectPlacer] SERVER: Access DENIED to " .. playerName .. " - Spawner currently locked by Owner")
+        TriggerClientEvent("bazq-objectplace:accessDenied", src, {
+            error = "ACCESS_DENIED",
+            message = "The Object Spawner is currently locked by the owner.",
+            details = "Contact the server owner for access."
+        })
+        return
+    end
     
     OPLog("[ObjectPlacer] SERVER: F7 access attempt by " .. playerName .. " (Identifier: " .. tostring(identifier) .. ", Role: " .. role .. ")")
 
     -- Test zone override: allow any user within the configured zone
     local inZone = false
-    if testZone and testZone.enabled then
+    if Config.TestZone and Config.TestZone.enabled then
         local ped = GetPlayerPed(src)
         if ped and ped ~= 0 then
             local coords = GetEntityCoords(ped)
@@ -1522,4 +1483,28 @@ AddEventHandler('bazq-os:requestTimestamp', function()
         offset = currentOffset,
         isDST = isDST
     })
+end)
+
+-- Event: Owner toggles the server spawner lock
+RegisterNetEvent("bazq-objectplace:saveLockState")
+AddEventHandler("bazq-objectplace:saveLockState", function(locked)
+    local src = source
+    local identifier = GetPlayerPrimaryIdentifier(src)
+    local role = GetUserRole(identifier)
+    
+    if role ~= "owner" then
+        dbg("Lock change denied to " .. GetPlayerName(src) .. " - not an owner")
+        return
+    end
+    
+    if not osAdminData.settings then
+        osAdminData.settings = {}
+    end
+    
+    osAdminData.settings.lockNonOwners = (locked == true)
+    SaveOsAdminToFile()
+    dbg("Server lock status set to " .. tostring(locked == true) .. " by owner " .. GetPlayerName(src))
+    
+    -- Sync updated state to all connected players
+    TriggerClientEvent("bazq-objectplace:receiveLockState", -1, locked == true)
 end)
