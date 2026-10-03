@@ -1217,11 +1217,11 @@ window.addEventListener("DOMContentLoaded", () => {
       { model: "bazq-wall2_wall5", weight: 15, width: 2.0 }
     ],
     "wall3": [
-      { model: "bazq-wood_prop1", weight: 10, width: 0.30 },
-      { model: "bazq-wood_prop2", weight: 10, width: 0.37 },
-      { model: "bazq-wood_prop3", weight: 10, width: 0.40 },
-      { model: "bazq-wood_prop4", weight: 10, width: 0.46 },
-      { model: "bazq-wood_prop5", weight: 10, width: 0.50 },
+      { model: "bazq-wall3_log1", weight: 10, width: 0.30 },
+      { model: "bazq-wall3_log2", weight: 10, width: 0.37 },
+      { model: "bazq-wall3_log3", weight: 10, width: 0.40 },
+      { model: "bazq-wall3_log4", weight: 10, width: 0.46 },
+      { model: "bazq-wall3_log5", weight: 10, width: 0.50 },
       { model: "bazq-wall3_wall1", weight: 15, width: 1.98 },
       { model: "bazq-wall3_wall2", weight: 15, width: 1.95 },
       { model: "bazq-wall3_wall3", weight: 20, width: 2.01 }
@@ -1240,7 +1240,7 @@ window.addEventListener("DOMContentLoaded", () => {
     const enableDecals = document.getElementById("pathEnableDecals")?.checked;
     const decalFrequency = parseInt(document.getElementById("pathDecalFrequency")?.value || "20");
     const axisLock = document.getElementById("pathAxisLock")?.checked;
-    const overlapMargin = parseFloat(document.getElementById("pathOverlapMargin")?.value || "1.5");
+    const overlapMargin = parseFloat(document.getElementById("pathOverlapMargin")?.value ?? "0.02");
     
     const activeDecals = [];
     document.querySelectorAll(".decal-badge.active").forEach(btn => {
@@ -1261,7 +1261,7 @@ window.addEventListener("DOMContentLoaded", () => {
         decalFrequency: decalFrequency,
         activeDecals: activeDecals,
         axisLock: !!axisLock,
-        overlapMargin: overlapMargin
+        overlapMargin: isNaN(overlapMargin) ? 0.02 : Math.max(0, overlapMargin)
       })
     }).catch(err => {
       // Ignore network errors when not drawing
@@ -1555,7 +1555,8 @@ window.addEventListener("DOMContentLoaded", () => {
       const enableDecals = document.getElementById("pathEnableDecals")?.checked;
       const decalFrequency = parseInt(document.getElementById("pathDecalFrequency")?.value || "20");
       const axisLock = document.getElementById("pathAxisLock")?.checked;
-      const overlapMargin = parseFloat(document.getElementById("pathOverlapMargin")?.value || "1.5");
+      const overlapMarginRaw = parseFloat(document.getElementById("pathOverlapMargin")?.value ?? "0.02");
+      const overlapMargin = isNaN(overlapMarginRaw) ? 0.02 : Math.max(0, overlapMarginRaw);
       
       const activeDecals = [];
       document.querySelectorAll(".decal-badge.active").forEach(btn => {
@@ -1655,6 +1656,200 @@ window.addEventListener("DOMContentLoaded", () => {
           })
         });
       }
+    });
+  }
+
+  // 📐 BLUEPRINT EDITOR STATE & HANDLERS
+  let currentBlueprintData = null;
+  let currentBlueprintSegments = [];
+  let selectedBlueprintIndex = 1;
+  let availableReplacements = [];
+
+  function updateBlueprintUI(data) {
+    currentBlueprintData = data;
+    currentBlueprintSegments = data.segments || [];
+    selectedBlueprintIndex = data.selectedIndex || 1;
+    availableReplacements = data.replacements || [];
+
+    const group = document.getElementById("blueprintControlsGroup");
+    if (group) group.style.display = "block";
+
+    const badge = document.getElementById("blueprintStatsBadge");
+    if (badge && data.stats) badge.textContent = `${data.stats.totalSegments} Segments`;
+
+    const placed = document.getElementById("blueprintPlacedDist");
+    if (placed && data.stats) placed.textContent = data.stats.placedDist;
+
+    const remainder = document.getElementById("blueprintRemainderDist");
+    if (remainder && data.stats) remainder.textContent = data.stats.remainder;
+
+    const total = document.getElementById("blueprintTotalDist");
+    if (total && data.stats) total.textContent = data.stats.totalDist;
+
+    // Reset Confirm button state
+    const confirmBtn = document.getElementById("blueprintConfirmBtn");
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "Confirm & Build (Enter)";
+    }
+
+    // Populate replacement dropdown
+    const replaceSelect = document.getElementById("blueprintReplaceSelect");
+    if (replaceSelect && availableReplacements.length > 0) {
+      replaceSelect.innerHTML = "";
+      availableReplacements.forEach(r => {
+        const opt = document.createElement("option");
+        opt.value = r.model;
+        opt.textContent = r.name;
+        replaceSelect.appendChild(opt);
+      });
+    }
+
+    renderSelectedBlueprintSegment(selectedBlueprintIndex);
+  }
+
+  function renderSelectedBlueprintSegment(index) {
+    selectedBlueprintIndex = index;
+    const seg = currentBlueprintSegments.find(s => s.index === index);
+    const indexSpan = document.getElementById("blueprintCurrentSegIndex");
+    if (indexSpan) indexSpan.textContent = `#${index}`;
+
+    if (!seg) return;
+
+    const nameSpan = document.getElementById("blueprintSegModelName");
+    if (nameSpan) {
+      nameSpan.textContent = seg.isDeleted ? "[GAP / DELETED]" : seg.model;
+    }
+
+    const rangeSpan = document.getElementById("blueprintSegDistRange");
+    if (rangeSpan) rangeSpan.textContent = `${seg.startDist} - ${seg.endDist}`;
+
+    const statusSpan = document.getElementById("blueprintSegStatus");
+    if (statusSpan) {
+      if (seg.isDeleted) {
+        statusSpan.textContent = "Deleted (Gap)";
+        statusSpan.style.color = "#ef4444";
+      } else if (seg.isOverride) {
+        statusSpan.textContent = seg.isGate ? "Gate Assembly (Locked)" : "Manual Override (Locked)";
+        statusSpan.style.color = "#fbbf24";
+      } else {
+        statusSpan.textContent = "Procedural";
+        statusSpan.style.color = "#22c55e";
+      }
+    }
+
+    const replaceSelect = document.getElementById("blueprintReplaceSelect");
+    if (replaceSelect && !seg.isDeleted) {
+      replaceSelect.value = seg.model;
+    }
+  }
+
+  const blueprintRandomizeBtn = document.getElementById("blueprintRandomizeBtn");
+  if (blueprintRandomizeBtn) {
+    blueprintRandomizeBtn.addEventListener("click", () => {
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "randomize" })
+      });
+    });
+  }
+
+  const blueprintPrevSegBtn = document.getElementById("blueprintPrevSegBtn");
+  if (blueprintPrevSegBtn) {
+    blueprintPrevSegBtn.addEventListener("click", () => {
+      if (currentBlueprintSegments.length === 0) return;
+      let newIdx = selectedBlueprintIndex - 1;
+      if (newIdx < 1) newIdx = currentBlueprintSegments.length;
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "selectSegment", index: newIdx })
+      });
+      renderSelectedBlueprintSegment(newIdx);
+    });
+  }
+
+  const blueprintNextSegBtn = document.getElementById("blueprintNextSegBtn");
+  if (blueprintNextSegBtn) {
+    blueprintNextSegBtn.addEventListener("click", () => {
+      if (currentBlueprintSegments.length === 0) return;
+      let newIdx = selectedBlueprintIndex + 1;
+      if (newIdx > currentBlueprintSegments.length) newIdx = 1;
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "selectSegment", index: newIdx })
+      });
+      renderSelectedBlueprintSegment(newIdx);
+    });
+  }
+
+  const blueprintReplaceSelect = document.getElementById("blueprintReplaceSelect");
+  if (blueprintReplaceSelect) {
+    blueprintReplaceSelect.addEventListener("change", (e) => {
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "replaceSegment", index: selectedBlueprintIndex, model: e.target.value })
+      });
+    });
+  }
+
+  const blueprintFlipSegBtn = document.getElementById("blueprintFlipSegBtn");
+  if (blueprintFlipSegBtn) {
+    blueprintFlipSegBtn.addEventListener("click", () => {
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "flipSegment", index: selectedBlueprintIndex })
+      });
+    });
+  }
+
+  const blueprintDeleteSegBtn = document.getElementById("blueprintDeleteSegBtn");
+  if (blueprintDeleteSegBtn) {
+    blueprintDeleteSegBtn.addEventListener("click", () => {
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "deleteSegment", index: selectedBlueprintIndex })
+      });
+    });
+  }
+
+  const blueprintUnlockSegBtn = document.getElementById("blueprintUnlockSegBtn");
+  if (blueprintUnlockSegBtn) {
+    blueprintUnlockSegBtn.addEventListener("click", () => {
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "unlockSegment", index: selectedBlueprintIndex })
+      });
+    });
+  }
+
+  const blueprintConfirmBtn = document.getElementById("blueprintConfirmBtn");
+  if (blueprintConfirmBtn) {
+    blueprintConfirmBtn.addEventListener("click", () => {
+      blueprintConfirmBtn.disabled = true;
+      blueprintConfirmBtn.textContent = "Persisting...";
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "confirm" })
+      });
+    });
+  }
+
+  const blueprintCancelBtn = document.getElementById("blueprintCancelBtn");
+  if (blueprintCancelBtn) {
+    blueprintCancelBtn.addEventListener("click", () => {
+      fetch("https://bazq-os/blueprintAction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "cancel" })
+      });
     });
   }
 
@@ -2628,6 +2823,14 @@ window.addEventListener("DOMContentLoaded", () => {
         break;
       case "exitDrawingMode":
         document.body.classList.remove("drawing-mode");
+        const bpControls = document.getElementById("blueprintControlsGroup");
+        if (bpControls) bpControls.style.display = "none";
+        break;
+      case "blueprintGenerated":
+        updateBlueprintUI(data);
+        break;
+      case "selectBlueprintSegment":
+        renderSelectedBlueprintSegment(data.index || 1);
         break;
       case "updateAxisLockCheckbox":
         const axisLockCheckbox = document.getElementById("pathAxisLock");

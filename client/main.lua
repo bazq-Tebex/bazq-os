@@ -60,10 +60,13 @@ local selectedObject = nil
 local objectEntity = nil
 local editingObjectData = nil
 local pathDrawing = false
+local CleanupBlueprintEntities = function() end
 local spawnedObjects = {}
 local lastAppliedRevision = 0
 local pendingPlacedEntities = {} -- map of requestId -> objectData
 local pendingBatchEntities = {} -- map of requestId -> list of objectData
+local pendingBlueprintRequests = {} -- map of requestId -> blueprintPlan
+local isConfirmPending = false
 
 local function GenerateRequestId(prefix)
     prefix = prefix or "req"
@@ -837,6 +840,9 @@ local objectList = {} -- Will be populated based on user packages
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName then
         ClearAllHighlights()
+        CleanupBlueprintEntities()
+        isConfirmPending = false
+        pendingBlueprintRequests = {}
         if inFocus then
             SetNuiFocus(false, false)
         end
@@ -1841,6 +1847,7 @@ RegisterKeyMapping('bazq_clear_selection', 'Clear Object Selection', 'keyboard',
 function DrawTxt(text, x,y,s,r,g,b,a,fnt,jst,shd,otl) SetTextFont(fnt or 0);SetTextProportional(0);SetTextScale(s,s);SetTextColour(r,g,b,a);if shd then SetTextDropShadow(2,2,0,0,0)end;if otl then SetTextOutline()end;if jst=="CENTER"then SetTextCentre(true)elseif jst=="RIGHT"then SetTextWrap(0.0,x);SetTextRightJustify(true)end;SetTextEntry("STRING");AddTextComponentString(text);DrawText(x,y) end
 
 function StartPlacingObject(modelName)
+    if pathDrawing then CleanupBlueprintEntities(); pathDrawing = false end
     if placing or editingObjectData then CancelPlacing(); if editingObjectData then CancelKeyboardEdit(false) end end
     -- Clear any selection highlighting when starting placement
     ClearAllHighlights()
@@ -3439,7 +3446,7 @@ local function SpawnPersistentObject(objSD)
             end
         end
         
-        if not (objSD.model == "bazq-sur_mkapi" or (objSD.model and string.match(objSD.model, "bazq%-wall2_gate%d+"))) then
+        if not (objSD.model == "bazq-sur_mkapi" or objSD.model == "bazq-wall3_gate" or (objSD.model and string.match(objSD.model, "bazq%-wall2_gate%d+"))) then
             SetEntityDynamic(ent, false)
         end
         
@@ -3630,6 +3637,18 @@ RegisterNetEvent("bazq-objectplace:objectsBatchCreated", function(delta)
     if CheckAndHandleRevisionMismatch(delta.revision) then return end
     
     local reqId = delta.requestId
+    if reqId and pendingBlueprintRequests[reqId] then
+        pendingBlueprintRequests[reqId] = nil
+        isConfirmPending = false
+        CleanupBlueprintEntities()
+        currentBlueprintPlan = nil
+        blueprintOverrides = {}
+        activePointA = nil
+        activePointB = nil
+        pathDrawing = false
+        SendNUIMessage({ action = 'exitDrawingMode' })
+    end
+    
     if reqId and pendingBatchEntities[reqId] then
         local pendingList = pendingBatchEntities[reqId]
         pendingBatchEntities[reqId] = nil
@@ -3688,6 +3707,22 @@ RegisterNetEvent("bazq-objectplace:mutationFailed", function(data)
     
     local reqId = data and data.requestId
     if reqId then
+        if pendingBlueprintRequests[reqId] then
+            local plan = pendingBlueprintRequests[reqId]
+            pendingBlueprintRequests[reqId] = nil
+            isConfirmPending = false
+            if not plan.userCancelled then
+                currentBlueprintPlan = plan
+                RenderBlueprintPlan(currentBlueprintPlan)
+                if SendBlueprintToNUI then
+                    SendBlueprintToNUI(currentBlueprintPlan, selectedSegIndex or 1)
+                end
+                SendNUIMessage({
+                    action = 'showError',
+                    message = string.format("Pen Tool confirmation rejected by server: %s", reasonMsg)
+                })
+            end
+        end
         if pendingPlacedEntities[reqId] then
             local pending = pendingPlacedEntities[reqId]
             if pending.entity and DoesEntityExist(pending.entity) then
@@ -3833,167 +3868,234 @@ local function AlignEntityToNormal(entity, normal, heading)
     SetEntityRotation(entity, pitch, roll, heading, 2, true)
 end
 
-local function BuildPathProps(pointA, pointB, selectedItem, isPackage, customWidth, options, mode, randomizerProps, spawnTower, prevDir, customPackageProps)
-    local dist = #(pointB - pointA)
-    if dist < 0.1 then return false, 0.0 end
+-- ==============================================================================
+-- 🏗️ PEN TOOL / BLUEPRINT EDITOR ENGINE (DETERMINISTIC & SERVER-AUTHORITATIVE)
+-- ==============================================================================
+
+local currentBlueprintPlan = nil
+local activeBlueprintEntities = {}
+local blueprintOverrides = {}
+local activePathOptions = nil
+local selectedSegIndex = 1
+local currentBlueprintSeed = 12345
+local activePointA = nil
+local activePointB = nil
+local activeSelectedItem = nil
+
+-- Pure Deterministic Pseudo-Random Number Generator (32-bit LCG)
+local function CreatePRNG(seed)
+    local state = seed or 12345
+    return function(minVal, maxVal)
+        state = (state * 1103515245 + 12345) % 2147483648
+        local r = state / 2147483648
+        if minVal and maxVal then
+            return math.floor(r * (maxVal - minVal + 1)) + minVal
+        elseif minVal then
+            return math.floor(r * minVal) + 1
+        end
+        return r
+    end
+end
+
+-- Calculate Euler rotation {x, y, z} from ground normal and heading
+local function CalculateRotationFromNormal(normal, heading)
+    local headingRad = math.rad(heading)
+    local forward = vector3(math.sin(headingRad), math.cos(headingRad), 0.0)
+    local right = vector3(math.cos(headingRad), -math.sin(headingRad), 0.0)
     
-    local pathStartIndex = #spawnedObjects + 1
-    local dir = (pointB - pointA) / dist
-    local startDist = 0.0
+    local dotF = forward.x * normal.x + forward.y * normal.y + forward.z * normal.z
+    local dotR = right.x * normal.x + right.y * normal.y + right.z * normal.z
     
-    local cornerModel = "bazq-kule1"
-    local cornerOffset = 2.7
+    local projForward = forward - normal * dotF
+    local projRight = right - normal * dotR
     
-    local pkgConf = Config.PathCreator.packages[selectedItem]
-    if isPackage and pkgConf and type(pkgConf) == "table" then
-        if pkgConf.cornerModel then cornerModel = pkgConf.cornerModel end
-        if pkgConf.cornerOffset then cornerOffset = pkgConf.cornerOffset end
+    local lenF = math.sqrt(projForward.x^2 + projForward.y^2 + projForward.z^2)
+    if lenF > 0.001 then projForward = projForward / lenF end
+    
+    local lenR = math.sqrt(projRight.x^2 + projRight.y^2 + projRight.z^2)
+    if lenR > 0.001 then projRight = projRight / lenR end
+    
+    local pitch = math.deg(math.asin(projForward.z))
+    local roll = -math.deg(math.asin(projRight.z))
+    
+    return { x = pitch, y = roll, z = heading }
+end
+
+-- Cleanup all temporary client-side preview entities
+CleanupBlueprintEntities = function()
+    if activeBlueprintEntities and #activeBlueprintEntities > 0 then
+        for _, bEnt in ipairs(activeBlueprintEntities) do
+            if DoesEntityExist(bEnt.entity) then
+                SetEntityAsMissionEntity(bEnt.entity, true, true)
+                DeleteEntity(bEnt.entity)
+            end
+        end
+    end
+    activeBlueprintEntities = {}
+end
+
+-- Generate a complete, immutable layout plan
+local function GenerateBlueprintPlan(pointA, pointB, packageId, options, seed, overrides)
+    if not pointA or not pointB then return nil end
+    overrides = overrides or {}
+    options = options or {}
+    
+    -- Overlap margin: overlaps consecutive segments to prevent visible seams
+    -- Validated and clamped: 0.0 (no overlap) to 0.5m maximum
+    local overlapMargin = math.max(0.0, math.min(0.5, tonumber(options.overlapMargin) or 0.02))
+    
+    local dx = pointB.x - pointA.x
+    local dy = pointB.y - pointA.y
+    local dz = pointB.z - pointA.z
+    local totalDist = math.sqrt(dx*dx + dy*dy + dz*dz)
+    if totalDist < 0.1 then return nil end
+    
+    local dir = vector3(dx / totalDist, dy / totalDist, dz / totalDist)
+    local pathHeading = math.deg(math.atan2(dir.x, dir.y))
+    local rand = CreatePRNG(seed)
+    
+    -- Resolve package metadata
+    local pkg = Config.PenTool.packages[packageId] or (Config.PathCreator and Config.PathCreator.packages and Config.PathCreator.packages[packageId])
+    if not pkg then
+        local pLen = (Config.PenTool.props and Config.PenTool.props[packageId]) or (options and options.customWidth) or 1.0
+        pkg = {
+            id = packageId,
+            name = packageId,
+            width = pLen,
+            headingOffset = packageId:match("bazq%-sur") and 0.0 or 90.0,
+            props = {
+                { model = packageId, length = pLen, weight = 100 }
+            }
+        }
     end
     
-    -- Corner tower placement at the start of this segment (junction pivot)
-    if spawnTower then
-        local towerHash = GetHashKey(cornerModel)
-        RequestModel(towerHash)
-        local startTime = GetGameTimer()
-        while not HasModelLoaded(towerHash) do
-            if GetGameTimer() - startTime > 3000 then break end
-            Citizen.Wait(10)
+    local plan = {
+        seed = seed,
+        packageId = packageId,
+        pointA = pointA,
+        pointB = pointB,
+        dir = dir,
+        totalDist = totalDist,
+        pathHeading = pathHeading,
+        segments = {},
+        cornerTower = nil,
+        stats = {
+            totalSegments = 0,
+            placedDist = 0.0,
+            remainder = 0.0
+        }
+    }
+    
+    -- Corner tower at Point A (junction pivot)
+    local startDist = 0.0
+    if options.cornerTowers and pkg.cornerModel then
+        local towerZ = pointA.z
+        if options.snapToGround then
+            local hitVal, gZ = GetGroundZFor_3dCoord(pointA.x, pointA.y, pointA.z + 10.0, false)
+            if hitVal then towerZ = gZ end
+        end
+        plan.cornerTower = {
+            model = pkg.cornerModel,
+            coords = vector3(pointA.x, pointA.y, towerZ),
+            heading = pathHeading,
+            rotation = { x = 0.0, y = 0.0, z = pathHeading },
+            ladder = pkg.cornerLadder
+        }
+        startDist = pkg.cornerOffset or 2.7
+    end
+    
+    local currentDist = startDist
+    local segIndex = 1
+    local safety = 0
+    
+    while currentDist + 0.05 < totalDist and safety < 300 do
+        safety = safety + 1
+        local distKey = string.format("%.2f", currentDist)
+        local override = overrides[distKey] or overrides[tonumber(distKey)] or overrides[segIndex]
+        
+        local segProp = nil
+        local segLength = 0.0
+        local isOverride = false
+        local isGateAssembly = false
+        local isDeleted = false
+        local isFlipped = false
+        local noFence = false
+        local noDecal = false
+        
+        if override then
+            isOverride = true
+            isDeleted = override.deleted == true
+            isFlipped = override.flipped == true
+            noFence = override.noFence == true
+            noDecal = override.noDecal == true
+            isGateAssembly = override.isGate == true
+            
+            if override.model then
+                segProp = override.model
+                segLength = override.length or (Config.PenTool.props[segProp] or 2.0)
+            elseif isDeleted then
+                segLength = override.length or 2.0
+            end
         end
         
-        if HasModelLoaded(towerHash) then
-            local towerZ = pointA.z
-            if options.snapToGround then
-                local hitVal, gZ = GetGroundZFor_3dCoord(pointA.x, pointA.y, pointA.z + 10.0, false)
-                if hitVal then towerZ = gZ end
+        if not isOverride then
+            -- Find available distance to next manual override (if any)
+            local nextOverrideDist = totalDist
+            for kDistStr, _ in pairs(overrides) do
+                local oDist = tonumber(kDistStr)
+                if oDist and oDist > currentDist + 0.05 and oDist < nextOverrideDist then
+                    nextOverrideDist = oDist
+                end
             end
             
-            local towerHeading = math.deg(math.atan2(dir.x, dir.y))
-            local towerObj = CreateObject(towerHash, pointA.x, pointA.y, towerZ, true, true, false)
-            if DoesEntityExist(towerObj) then
-                SetEntityAsMissionEntity(towerObj, true, true)
-                FreezeEntityPosition(towerObj, true)
-                SetEntityCollision(towerObj, true, true)
-                SetEntityHeading(towerObj, towerHeading)
+            local availableSpace = math.min(totalDist - currentDist, nextOverrideDist - currentDist)
+            local eligibleProps = {}
+            local totalWeight = 0
+            local propList = (options.customPackageProps and #options.customPackageProps > 0) and options.customPackageProps or pkg.props
+            
+            for _, p in ipairs(propList) do
+                local pModel = p.model or p
+                local pLen = p.length or Config.PenTool.props[pModel] or (pkg.width or 2.0)
+                local pWeight = tonumber(p.weight) or 10
                 
-                local rot = GetEntityRotation(towerObj, 2)
-                local newIndex = #spawnedObjects + 1
-                spawnedObjects[newIndex] = {
-                    entity = towerObj,
-                    model = cornerModel,
-                    coords = GetEntityCoords(towerObj),
-                    heading = GetEntityHeading(towerObj),
-                    rotation = {x = rot.x, y = rot.y, z = rot.z},
-                    playerName = currentPlacementOptions.playerName or "Unknown",
-                    timestamp = GetRealTimestamp(),
-                    originalIndex = newIndex
-                }
-                RegisterTargetForEntity(towerObj)
+                if pLen <= availableSpace + 0.01 then
+                    table.insert(eligibleProps, { model = pModel, length = pLen, weight = pWeight })
+                    totalWeight = totalWeight + pWeight
+                end
             end
-        end
-        
-        -- Start wall placement offset by tower radius
-        startDist = cornerOffset
-    end
-    
-    local tempDist = startDist
-    local propsToSpawn = {}
-    local packageProps = {}
-    
-    if mode == "single" then
-        if isPackage then
-            local pkgData = Config.PathCreator.packages[selectedItem]
-            if type(pkgData) == "table" and pkgData.props then
-                packageProps = pkgData.props
-            else
-                packageProps = packageObjects[selectedItem] or {}
-            end
-            if #packageProps == 0 then
-                table.insert(packageProps, selectedItem)
-            end
-        end
-    end
-    
-    local spawnedCount = 0
-    local safetyCounter = 0
-    
-    while tempDist + 0.1 < dist and safetyCounter < 200 do
-        safetyCounter = safetyCounter + 1
-        
-        local propName = ""
-        local propWidth = customWidth
-        
-        if mode == "multi" then
-            local randVal = math.random(1, 100)
-            local selectedProp = nil
-            local currentSum = 0
-            for _, p in ipairs(randomizerProps) do
-                currentSum = currentSum + (tonumber(p.weight) or 0)
-                if randVal <= currentSum then
-                    selectedProp = p
+            
+            if #eligibleProps == 0 or totalWeight <= 0 then
+                -- Unused remainder: leave space empty
+                if nextOverrideDist < totalDist then
+                    currentDist = nextOverrideDist
+                else
                     break
                 end
-            end
-            if not selectedProp and #randomizerProps > 0 then
-                selectedProp = randomizerProps[1]
-            end
-            propName = selectedProp and selectedProp.model or ""
-            propWidth = selectedProp and tonumber(selectedProp.width) or customWidth
-        elseif isPackage then
-            local pkgConf = Config.PathCreator.packages[selectedItem]
-            local selectedProp = nil
-            
-            -- Try UI-provided custom weights first
-            if customPackageProps and #customPackageProps > 0 then
-                local totalWeight = 0
-                for _, p in ipairs(customPackageProps) do
-                    totalWeight = totalWeight + (tonumber(p.weight) or 0)
-                end
-                if totalWeight > 0 then
-                    local randVal = math.random(1, totalWeight)
-                    local currentSum = 0
-                    for _, p in ipairs(customPackageProps) do
-                        currentSum = currentSum + (tonumber(p.weight) or 0)
-                        if randVal <= currentSum then
-                            selectedProp = p.model
-                            break
-                        end
+            else
+                local roll = rand(1, totalWeight)
+                local accumulated = 0
+                for _, ep in ipairs(eligibleProps) do
+                    accumulated = accumulated + ep.weight
+                    if roll <= accumulated then
+                        segProp = ep.model
+                        segLength = ep.length
+                        break
                     end
                 end
-            end
-            
-            -- Fallback to config weights or list if customPackageProps is not provided or empty
-            if not selectedProp and pkgConf and pkgConf.props then
-                if type(pkgConf.props[1]) == "table" then
-                    local totalWeight = 0
-                    for _, p in ipairs(pkgConf.props) do
-                        totalWeight = totalWeight + (p.weight or 0)
-                    end
-                    local randVal = math.random(1, totalWeight)
-                    local currentSum = 0
-                    for _, p in ipairs(pkgConf.props) do
-                        currentSum = currentSum + (p.weight or 0)
-                        if randVal <= currentSum then
-                            selectedProp = p.model
-                            break
-                        end
-                    end
-                else
-                    selectedProp = pkgConf.props[math.random(1, #pkgConf.props)]
+                if not segProp then
+                    segProp = eligibleProps[1].model
+                    segLength = eligibleProps[1].length
                 end
             end
-            propName = selectedProp or selectedItem
-            propWidth = Config.PathCreator.props[propName] or (pkgConf and type(pkgConf) == "table" and pkgConf.width) or customWidth
-        else
-            propName = selectedItem
-            propWidth = Config.PathCreator.props[selectedItem] or customWidth
         end
         
-        -- Prevent spawning past pointB
-        if tempDist + propWidth > dist then
+        -- Strict bounds check: never pass Point B or allow non-positive segment length
+        if not segLength or segLength <= 0.01 or currentDist + segLength > totalDist + 0.01 then
             break
         end
         
-        local centerPos = pointA + dir * (tempDist + propWidth / 2)
+        local centerDist = currentDist + segLength / 2.0
+        local centerPos = pointA + dir * centerDist
         local spawnZ = centerPos.z
         local groundNormal = vector3(0.0, 0.0, 1.0)
         
@@ -4005,239 +4107,512 @@ local function BuildPathProps(pointA, pointB, selectedItem, isPackage, customWid
                 groundNormal = normal
             else
                 local success, gZ = GetGroundZFor_3dCoord(centerPos.x, centerPos.y, centerPos.z + 10.0, false)
-                if success then
-                    spawnZ = gZ
-                end
+                if success then spawnZ = gZ end
             end
         end
         
-        -- Determine heading offset (Y-oriented props are oriented along heading vector, i.e., 0.0 deg offset)
-        local propHeadingOffset = 90.0
-        if propName:match("bazq%-sur%d+") then
-            propHeadingOffset = 0.0
-        end
-        local pkgConf = Config.PathCreator.packages[selectedItem]
-        if isPackage and pkgConf and type(pkgConf) == "table" and pkgConf.headingOffset ~= nil then
-            propHeadingOffset = pkgConf.headingOffset
-        end
-        
-        local pathHeading = math.deg(math.atan2(dir.x, dir.y))
-        local baseHeading = pathHeading + propHeadingOffset
-        if options.randomRotation then
-            baseHeading = baseHeading + math.random(0, 360)
-        end
-        
-        local modelHash = GetHashKey(propName)
-        if IsModelInCdimage(modelHash) and IsModelValid(modelHash) then
-            RequestModel(modelHash)
-            local startTime = GetGameTimer()
-            while not HasModelLoaded(modelHash) do
-                if GetGameTimer() - startTime > 3000 then break end
-                Citizen.Wait(10)
+        if isDeleted then
+            local segmentRecord = {
+                index = segIndex,
+                distKey = distKey,
+                startDist = currentDist,
+                endDist = currentDist + segLength,
+                length = segLength,
+                isOverride = true,
+                isFlipped = false,
+                isGate = false,
+                deleted = true,
+                primary = {
+                    model = "gap",
+                    coords = vector3(centerPos.x, centerPos.y, spawnZ),
+                    heading = pathHeading,
+                    rotation = { x = 0.0, y = 0.0, z = pathHeading },
+                    groundNormal = groundNormal
+                },
+                attachments = {}
+            }
+            table.insert(plan.segments, segmentRecord)
+        else
+            local propHeadingOffset = pkg.headingOffset or 90.0
+            if segProp:match("bazq%-sur") then
+                propHeadingOffset = 0.0
             end
-            if HasModelLoaded(modelHash) then
-                local obj = CreateObject(modelHash, centerPos.x, centerPos.y, spawnZ, true, true, false)
-                if DoesEntityExist(obj) then
-                    SetEntityAsMissionEntity(obj, true, true)
-                    FreezeEntityPosition(obj, true)
-                    SetEntityCollision(obj, true, true)
-                    
-                    if options.alignToGround then
-                        AlignEntityToNormal(obj, groundNormal, baseHeading)
-                    else
-                        SetEntityHeading(obj, baseHeading)
-                    end
-                    
-                    -- Spawn double doors if it is a gate frame (bazq-sur_kapi)
-                    local isDualDoors = false
-                    local interiorEnt = nil
-                    local interiorModelVal = nil
-                    
-                    if propName == "bazq-sur_kapi" then
-                        local doorHash = GetHashKey("bazq-sur_mkapi")
-                        RequestModel(doorHash)
-                        local doorStartTime = GetGameTimer()
-                        while not HasModelLoaded(doorHash) do
-                            if GetGameTimer() - doorStartTime > 3000 then break end
-                            Citizen.Wait(10)
-                        end
-                        
-                        if HasModelLoaded(doorHash) then
-                            -- Calculate forward direction based on baseHeading
-                            local headingRad = math.rad(baseHeading)
-                            local forwardX = -math.sin(headingRad)
-                            local forwardY = math.cos(headingRad)
-                            
-                            -- Spawn first door with positive Y offset (+90 degree rotation)
-                            local door1Coords = vector3(
-                                centerPos.x + (5.37824 * forwardX),
-                                centerPos.y + (5.37824 * forwardY),
-                                spawnZ
-                            )
-                            local door1Entity = CreateObject(doorHash, door1Coords.x, door1Coords.y, door1Coords.z, true, true, false)
-                            if DoesEntityExist(door1Entity) then
-                                SetEntityHeading(door1Entity, baseHeading + 90.0)
-                                SetEntityAsMissionEntity(door1Entity, true, true)
-                                SetEntityDynamic(door1Entity, true)
-                                SetEntityCollision(door1Entity, true, true)
-                                if options.alignToGround then
-                                    AlignEntityToNormal(door1Entity, groundNormal, baseHeading + 90.0)
-                                end
-                            end
-                            
-                            -- Spawn second door with negative Y offset (-90 degree rotation)
-                            local door2Coords = vector3(
-                                centerPos.x - (5.37824 * forwardX),
-                                centerPos.y - (5.37824 * forwardY),
-                                spawnZ
-                            )
-                            local door2Entity = CreateObject(doorHash, door2Coords.x, door2Coords.y, door2Coords.z, true, true, false)
-                            if DoesEntityExist(door2Entity) then
-                                SetEntityHeading(door2Entity, baseHeading - 90.0)
-                                SetEntityAsMissionEntity(door2Entity, true, true)
-                                SetEntityDynamic(door2Entity, true)
-                                SetEntityCollision(door2Entity, true, true)
-                                if options.alignToGround then
-                                    AlignEntityToNormal(door2Entity, groundNormal, baseHeading - 90.0)
-                                end
-                            end
-                            
-                            if DoesEntityExist(door1Entity) and DoesEntityExist(door2Entity) then
-                                interiorEnt = { door1Entity, door2Entity }
-                                interiorModelVal = "bazq-sur_mkapi"
-                                isDualDoors = true
-                            end
-                        end
-                    end
-                    
-                    local rot = GetEntityRotation(obj, 2)
-                    local newIndex = #spawnedObjects + 1
-                    spawnedObjects[newIndex] = {
-                        entity = obj,
-                        model = propName,
-                        coords = GetEntityCoords(obj),
-                        heading = GetEntityHeading(obj),
-                        rotation = {x = rot.x, y = rot.y, z = rot.z},
-                        playerName = currentPlacementOptions.playerName or "Unknown",
-                        timestamp = GetRealTimestamp(),
-                        originalIndex = newIndex,
-                        hasDualDoors = isDualDoors,
-                        interiorEntity = interiorEnt,
-                        interiorModel = interiorModelVal
-                    }
-                    
-                    RegisterTargetForEntity(obj)
-                    spawnedCount = spawnedCount + 1
-                    
-                    -- Spawn random decal on top of the wall if it's a concrete wall segment, enabled, and chance rolls success
-                    if propName:match("^bazq%-wall2_wall%d+") and options.enableDecals and options.activeDecals and #options.activeDecals > 0 then
-                        local roll = math.random(1, 100)
-                        local chance = tonumber(options.decalFrequency) or 20
-                        if roll <= chance then
-                            local decalModel = options.activeDecals[math.random(1, #options.activeDecals)]
-                            local decalHash = GetHashKey(decalModel)
-                            if IsModelInCdimage(decalHash) and IsModelValid(decalHash) then
-                                RequestModel(decalHash)
-                                local decalStartTime = GetGameTimer()
-                                while not HasModelLoaded(decalHash) do
-                                    if GetGameTimer() - decalStartTime > 1000 then break end
-                                    Citizen.Wait(10)
-                                end
-                                
-                                if HasModelLoaded(decalHash) then
-                                    local decalObj = CreateObject(decalHash, centerPos.x, centerPos.y, spawnZ, true, true, false)
-                                    if DoesEntityExist(decalObj) then
-                                        SetEntityAsMissionEntity(decalObj, true, true)
-                                        FreezeEntityPosition(decalObj, true)
-                                        SetEntityCollision(decalObj, true, true)
-                                        
-                                        if options.alignToGround then
-                                            AlignEntityToNormal(decalObj, groundNormal, baseHeading)
-                                        else
-                                            SetEntityHeading(decalObj, baseHeading)
-                                        end
-                                        
-                                        local dRot = GetEntityRotation(decalObj, 2)
-                                        local dIndex = #spawnedObjects + 1
-                                        spawnedObjects[dIndex] = {
-                                            entity = decalObj,
-                                            model = decalModel,
-                                            coords = GetEntityCoords(decalObj),
-                                            heading = GetEntityHeading(decalObj),
-                                            rotation = {x = dRot.x, y = dRot.y, z = dRot.z},
-                                            playerName = currentPlacementOptions.playerName or "Unknown",
-                                            timestamp = GetRealTimestamp(),
-                                            originalIndex = dIndex
-                                        }
-                                        RegisterTargetForEntity(decalObj)
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-                SetModelAsNoLongerNeeded(modelHash)
+            
+            local segHeading = pathHeading + propHeadingOffset
+            if options.randomRotation then
+                segHeading = segHeading + rand(0, 360)
             end
-        end
-        
-        -- Apply the user-defined overlap margin (converted from cm to meters) to prevent visible gaps between consecutive walls
-        local overlapVal = 1.5
-        if options and options.overlapMargin ~= nil then
-            overlapVal = tonumber(options.overlapMargin) or 1.5
-        end
-        local overlapMargin = overlapVal / 100.0
-        tempDist = tempDist + propWidth - overlapMargin
-    end
-    
-    if spawnedCount > 0 or spawnTower then
-        local batchReqId = GenerateRequestId("path")
-        local newBatch = {}
-        local newBatchEntities = {}
-        for idx = pathStartIndex, #spawnedObjects do
-            local item = spawnedObjects[idx]
-            if item then
-                table.insert(newBatchEntities, item)
-                table.insert(newBatch, {
-                    model = item.model,
-                    coords = { x = item.coords.x, y = item.coords.y, z = item.coords.z },
-                    heading = item.heading,
-                    rotation = item.rotation,
-                    interiorModel = item.interiorModel,
-                    hasDualDoors = item.hasDualDoors,
-                    playerName = item.playerName,
-                    timestamp = item.timestamp
+            if isFlipped then
+                segHeading = segHeading + 180.0
+            end
+            
+            local segRotation = { x = 0.0, y = 0.0, z = segHeading }
+            if options.alignToGround then
+                segRotation = CalculateRotationFromNormal(groundNormal, segHeading)
+            end
+            
+            local isGate = isGateAssembly or (segProp:match("gate") ~= nil) or (segProp:match("kapi") ~= nil) or (pkg.gateAssembly and segProp == pkg.gateAssembly.frameModel)
+            
+            local segmentRecord = {
+                index = segIndex,
+                distKey = distKey,
+                startDist = currentDist,
+                endDist = currentDist + segLength,
+                length = segLength,
+                isOverride = isOverride,
+                isFlipped = isFlipped,
+                isGate = isGate,
+                deleted = false,
+                primary = {
+                    model = segProp,
+                    coords = vector3(centerPos.x, centerPos.y, spawnZ),
+                    heading = segHeading,
+                    rotation = segRotation,
+                    groundNormal = groundNormal
+                },
+                attachments = {}
+            }
+            
+            -- ATTACHMENTS GENERATION (Does NOT consume path length)
+            -- 1. Stone wall gate frame (bazq-sur_kapi): Dual doors (bazq-sur_mkapi)
+            if segProp == "bazq-sur_kapi" then
+                local headingRad = math.rad(segHeading)
+                local forwardX = -math.sin(headingRad)
+                local forwardY = math.cos(headingRad)
+                local forward = vector3(forwardX, forwardY, 0.0)
+                
+                table.insert(segmentRecord.attachments, {
+                    model = "bazq-sur_mkapi",
+                    coords = vector3(centerPos.x + (5.37824 * forward.x), centerPos.y + (5.37824 * forward.y), spawnZ),
+                    heading = segHeading + 90.0,
+                    rotation = { x = 0.0, y = 0.0, z = segHeading + 90.0 },
+                    hasDualDoors = true,
+                    type = "door1"
+                })
+                table.insert(segmentRecord.attachments, {
+                    model = "bazq-sur_mkapi",
+                    coords = vector3(centerPos.x - (5.37824 * forward.x), centerPos.y - (5.37824 * forward.y), spawnZ),
+                    heading = segHeading - 90.0,
+                    rotation = { x = 0.0, y = 0.0, z = segHeading - 90.0 },
+                    hasDualDoors = true,
+                    type = "door2"
                 })
             end
+            
+            -- 2. Stone wall fence (bazq-surfence)
+            if segProp:match("bazq%-sur[1-5]") and options.enableFences and not noFence then
+                local upVec = groundNormal or vector3(0.0, 0.0, 1.0)
+                local fenceCoords = centerPos + upVec * 5.0
+                table.insert(segmentRecord.attachments, {
+                    model = "bazq-surfence",
+                    coords = fenceCoords,
+                    heading = segHeading,
+                    rotation = segRotation,
+                    type = "fence"
+                })
+            end
+            
+            -- 3. Concrete wall gate (bazq-wall2_gate1..4): Poles at both ends
+            if segProp:match("bazq%-wall2_gate%d+") then
+                local poleConf = pkg.gateAssembly and pkg.gateAssembly.poles or {}
+                local leftConf = poleConf.leftPole or { tangentOffset = -segLength / 2.0, normalOffset = 0.0 }
+                local rightConf = poleConf.rightPole or { tangentOffset = segLength / 2.0, normalOffset = 0.0 }
+                local perp = vector3(-dir.y, dir.x, 0.0)
+                
+                local pole1Pos = centerPos + dir * (leftConf.tangentOffset or -segLength / 2.0) + perp * (leftConf.normalOffset or 0.0)
+                local pole1Z = pole1Pos.z + (leftConf.zOffset or 0.0)
+                if options.snapToGround then
+                    local hitVal, gZ = GetGroundZFor_3dCoord(pole1Pos.x, pole1Pos.y, pole1Pos.z + 10.0, false)
+                    if hitVal then pole1Z = gZ + (leftConf.zOffset or 0.0) end
+                end
+                table.insert(segmentRecord.attachments, {
+                    model = poleConf.model or "bazq-wall2_pole",
+                    coords = vector3(pole1Pos.x, pole1Pos.y, pole1Z),
+                    heading = segHeading + (leftConf.headingOffset or 0.0),
+                    rotation = { x = 0.0, y = 0.0, z = segHeading + (leftConf.headingOffset or 0.0) },
+                    type = "gate_pole_start"
+                })
+                
+                local pole2Pos = centerPos + dir * (rightConf.tangentOffset or segLength / 2.0) + perp * (rightConf.normalOffset or 0.0)
+                local pole2Z = pole2Pos.z + (rightConf.zOffset or 0.0)
+                if options.snapToGround then
+                    local hitVal, gZ = GetGroundZFor_3dCoord(pole2Pos.x, pole2Pos.y, pole2Pos.z + 10.0, false)
+                    if hitVal then pole2Z = gZ + (rightConf.zOffset or 0.0) end
+                end
+                table.insert(segmentRecord.attachments, {
+                    model = poleConf.model or "bazq-wall2_pole",
+                    coords = vector3(pole2Pos.x, pole2Pos.y, pole2Z),
+                    heading = segHeading + (rightConf.headingOffset or 0.0),
+                    rotation = { x = 0.0, y = 0.0, z = segHeading + (rightConf.headingOffset or 0.0) },
+                    type = "gate_pole_end"
+                })
+            end
+            
+            -- 4. Concrete wall fence (bazq-wall2_wallfence)
+            if segProp:match("bazq%-wall2_wall%d+") and options.enableFences and not noFence then
+                table.insert(segmentRecord.attachments, {
+                    model = "bazq-wall2_wallfence",
+                    coords = vector3(centerPos.x, centerPos.y, spawnZ),
+                    heading = segHeading,
+                    rotation = segRotation,
+                    type = "fence"
+                })
+            end
+            
+            -- 5. Concrete wall decals (bazq-wall2_walldecal1..10)
+            if segProp:match("bazq%-wall2_wall%d+") and options.enableDecals and not noDecal then
+                local chance = tonumber(options.decalFrequency) or 20
+                if rand(1, 100) <= chance then
+                    local decalList = options.activeDecals or (pkg.attachments and pkg.attachments.decals and pkg.attachments.decals.models) or {}
+                    if #decalList > 0 then
+                        local dModel = decalList[rand(1, #decalList)]
+                        local decalHeading = segHeading + (isFlipped and 180.0 or 0.0)
+                        table.insert(segmentRecord.attachments, {
+                            model = dModel,
+                            coords = vector3(centerPos.x, centerPos.y, spawnZ),
+                            heading = decalHeading,
+                            rotation = { x = segRotation.x, y = segRotation.y, z = decalHeading },
+                            type = "decal"
+                        })
+                    end
+                end
+            end
+            
+            -- 6. Wood gateframe companion (bazq-wall3_gate)
+            if segProp == "bazq-wall3_gateframe" then
+                table.insert(segmentRecord.attachments, {
+                    model = "bazq-wall3_gate",
+                    coords = vector3(centerPos.x, centerPos.y, spawnZ),
+                    heading = segHeading,
+                    rotation = segRotation,
+                    type = "wood_gate"
+                })
+            end
+            
+            table.insert(plan.segments, segmentRecord)
         end
         
-        pendingBatchEntities[batchReqId] = newBatchEntities
-        TriggerServerEvent("bazq-objectplace:batchPlaceObjects", {
-            objects = newBatch,
-            requestId = batchReqId
-        })
-        
-        SendNUIMessage({
-            action = 'updateSpawnedList',
-            data = GetSerializableSpawnedObjects()
-        })
-        SendNUIMessage({
-            action = 'log',
-            message = 'Path Creator: Successfully placed ' .. (spawnedCount + (spawnTower and 1 or 0)) .. ' objects.',
-            type = 'success'
-        })
-        return true, tempDist
-    else
-        SendNUIMessage({
-            action = 'log',
-            message = 'Path Creator: No objects placed (path too short or invalid models).',
-            type = 'warning'
-        })
-        return false, 0.0
+        -- Advance cursor: apply overlap margin so consecutive segments overlap
+        -- Guard: step must be at least 0.001 to prevent infinite loop on near-zero segments
+        local step = math.max(0.001, segLength - overlapMargin)
+        currentDist = currentDist + step
+        segIndex = segIndex + 1
+    end
+    
+    plan.stats.totalSegments = #plan.segments
+    plan.stats.placedDist = currentDist - startDist
+    plan.stats.remainder = math.max(0.0, totalDist - currentDist)
+    
+    return plan
+end
+
+-- Render temporary preview entities for the current plan
+local function RenderBlueprintPlan(plan)
+    CleanupBlueprintEntities()
+    if not plan then return end
+    
+    -- Preload unique models to avoid hitching and repeated streaming calls
+    local uniqueModels = {}
+    if plan.cornerTower then
+        uniqueModels[GetHashKey(plan.cornerTower.model)] = true
+        if plan.cornerTower.ladder then
+            uniqueModels[GetHashKey(plan.cornerTower.ladder)] = true
+        end
+    end
+    for _, seg in ipairs(plan.segments) do
+        if not seg.deleted then
+            uniqueModels[GetHashKey(seg.primary.model)] = true
+            for _, att in ipairs(seg.attachments or {}) do
+                uniqueModels[GetHashKey(att.model)] = true
+            end
+        end
+    end
+    
+    for mHash, _ in pairs(uniqueModels) do
+        RequestModel(mHash)
+        local startT = GetGameTimer()
+        while not HasModelLoaded(mHash) and GetGameTimer() - startT < 1500 do
+            Citizen.Wait(0)
+        end
+    end
+    
+    -- Corner Tower preview
+    if plan.cornerTower then
+        local tHash = GetHashKey(plan.cornerTower.model)
+        if HasModelLoaded(tHash) then
+            local tObj = CreateObject(tHash, plan.cornerTower.coords.x, plan.cornerTower.coords.y, plan.cornerTower.coords.z, false, false, false)
+            if DoesEntityExist(tObj) then
+                FreezeEntityPosition(tObj, true)
+                SetEntityCollision(tObj, false, false)
+                SetEntityAlpha(tObj, 210, false)
+                SetEntityHeading(tObj, plan.cornerTower.heading)
+                table.insert(activeBlueprintEntities, { entity = tObj, isCorner = true })
+            end
+        end
+        if plan.cornerTower.ladder then
+            local lHash = GetHashKey(plan.cornerTower.ladder)
+            if HasModelLoaded(lHash) then
+                local lObj = CreateObject(lHash, plan.cornerTower.coords.x, plan.cornerTower.coords.y, plan.cornerTower.coords.z, false, false, false)
+                if DoesEntityExist(lObj) then
+                    FreezeEntityPosition(lObj, true)
+                    SetEntityCollision(lObj, false, false)
+                    SetEntityAlpha(lObj, 210, false)
+                    SetEntityHeading(lObj, plan.cornerTower.heading)
+                    table.insert(activeBlueprintEntities, { entity = lObj, isAttachment = true })
+                end
+            end
+        end
+    end
+    
+    -- Segments preview
+    for sIdx, seg in ipairs(plan.segments) do
+        if not seg.deleted then
+            -- Primary prop
+            local pHash = GetHashKey(seg.primary.model)
+            if HasModelLoaded(pHash) then
+                local pObj = CreateObject(pHash, seg.primary.coords.x, seg.primary.coords.y, seg.primary.coords.z, false, false, false)
+                if DoesEntityExist(pObj) then
+                    FreezeEntityPosition(pObj, true)
+                    SetEntityCollision(pObj, false, false)
+                    SetEntityAlpha(pObj, 210, false)
+                    if seg.primary.rotation then
+                        SetEntityRotation(pObj, seg.primary.rotation.x, seg.primary.rotation.y, seg.primary.rotation.z, 2, true)
+                    else
+                        SetEntityHeading(pObj, seg.primary.heading)
+                    end
+                    table.insert(activeBlueprintEntities, { entity = pObj, segIndex = sIdx, isPrimary = true, coords = seg.primary.coords })
+                end
+            end
+            
+            -- Attachments
+            for _, att in ipairs(seg.attachments or {}) do
+                local aHash = GetHashKey(att.model)
+                if HasModelLoaded(aHash) then
+                    local aObj = CreateObject(aHash, att.coords.x, att.coords.y, att.coords.z, false, false, false)
+                    if DoesEntityExist(aObj) then
+                        FreezeEntityPosition(aObj, true)
+                        SetEntityCollision(aObj, false, false)
+                        SetEntityAlpha(aObj, 195, false)
+                        if att.rotation then
+                            SetEntityRotation(aObj, att.rotation.x, att.rotation.y, att.rotation.z, 2, true)
+                        else
+                            SetEntityHeading(aObj, att.heading)
+                        end
+                        table.insert(activeBlueprintEntities, { entity = aObj, segIndex = sIdx, isAttachment = true })
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Release requested models
+    for mHash, _ in pairs(uniqueModels) do
+        SetModelAsNoLongerNeeded(mHash)
     end
 end
 
-local activePathOptions = nil
+-- Send blueprint state and available replacements to NUI
+local function SendBlueprintToNUI(plan, selIndex)
+    if not plan then return end
+    local segList = {}
+    for i, seg in ipairs(plan.segments) do
+        table.insert(segList, {
+            index = i,
+            distKey = seg.distKey,
+            startDist = string.format("%.1fm", seg.startDist),
+            endDist = string.format("%.1fm", seg.endDist),
+            length = string.format("%.2fm", seg.length),
+            model = seg.primary.model,
+            isOverride = seg.isOverride,
+            isGate = seg.isGate,
+            isFlipped = seg.isFlipped,
+            isDeleted = seg.deleted == true,
+            attachmentCount = #(seg.attachments or {})
+        })
+    end
+    
+    local pkg = Config.PenTool.packages[plan.packageId] or (Config.PathCreator and Config.PathCreator.packages and Config.PathCreator.packages[plan.packageId])
+    local availableReplacements = {}
+    if pkg then
+        if pkg.props then
+            for _, p in ipairs(pkg.props) do
+                table.insert(availableReplacements, {
+                    model = p.model,
+                    name = (p.name or p.model) .. " (" .. string.format("%.2fm", p.length or 2.0) .. ")",
+                    length = p.length or 2.0,
+                    isGate = false
+                })
+            end
+        end
+        if pkg.gateAssembly then
+            if pkg.gateAssembly.models then
+                for gIdx, gMod in ipairs(pkg.gateAssembly.models) do
+                    table.insert(availableReplacements, {
+                        model = gMod,
+                        name = "Gate Variant " .. gIdx .. " (" .. string.format("%.1fm", pkg.gateAssembly.length or 6.0) .. ")",
+                        length = pkg.gateAssembly.length or 6.0,
+                        isGate = true
+                    })
+                end
+            elseif pkg.gateAssembly.frameModel then
+                table.insert(availableReplacements, {
+                    model = pkg.gateAssembly.frameModel,
+                    name = "Gate Assembly (" .. string.format("%.1fm", pkg.gateAssembly.length or 6.0) .. ")",
+                    length = pkg.gateAssembly.length or 6.0,
+                    isGate = true
+                })
+            end
+        end
+    end
+    
+    SendNUIMessage({
+        action = 'blueprintGenerated',
+        stats = {
+            totalSegments = #plan.segments,
+            totalDist = string.format("%.1fm", plan.totalDist),
+            placedDist = string.format("%.1fm", plan.stats.placedDist),
+            remainder = string.format("%.1fm", plan.stats.remainder),
+            seed = plan.seed
+        },
+        segments = segList,
+        selectedIndex = selIndex or 1,
+        replacements = availableReplacements
+    })
+end
 
+-- Confirm and persist the exact blueprint plan through Phase 3 authoritative batchPlaceObjects
+local function ConfirmBlueprint(plan)
+    if isConfirmPending then
+        SendNUIMessage({
+            action = 'log',
+            message = 'Blueprint confirmation is already in progress. Please wait...',
+            type = 'warning'
+        })
+        return false
+    end
+    
+    if not plan or not plan.segments or #plan.segments == 0 then
+        SendNUIMessage({
+            action = 'log',
+            message = 'Blueprint is empty. Nothing to place.',
+            type = 'warning'
+        })
+        return false
+    end
+    
+    local batchReqId = GenerateRequestId("pen_confirm")
+    local batchObjects = {}
+    
+    -- Corner tower if present (and optional ladder as separate explicit object)
+    if plan.cornerTower then
+        table.insert(batchObjects, {
+            model = plan.cornerTower.model,
+            coords = { x = plan.cornerTower.coords.x, y = plan.cornerTower.coords.y, z = plan.cornerTower.coords.z },
+            heading = plan.cornerTower.heading,
+            rotation = plan.cornerTower.rotation,
+            playerName = currentPlacementOptions.playerName or "Unknown",
+            timestamp = GetRealTimestamp()
+        })
+        if plan.cornerTower.ladder then
+            table.insert(batchObjects, {
+                model = plan.cornerTower.ladder,
+                coords = { x = plan.cornerTower.coords.x, y = plan.cornerTower.coords.y, z = plan.cornerTower.coords.z },
+                heading = plan.cornerTower.heading,
+                rotation = plan.cornerTower.rotation,
+                playerName = currentPlacementOptions.playerName or "Unknown",
+                timestamp = GetRealTimestamp()
+            })
+        end
+    end
+    
+    -- Flatten all segments and attachments
+    for _, seg in ipairs(plan.segments) do
+        if not seg.deleted then
+            table.insert(batchObjects, {
+                model = seg.primary.model,
+                coords = { x = seg.primary.coords.x, y = seg.primary.coords.y, z = seg.primary.coords.z },
+                heading = seg.primary.heading,
+                rotation = seg.primary.rotation,
+                playerName = currentPlacementOptions.playerName or "Unknown",
+                timestamp = GetRealTimestamp()
+            })
+            
+            for _, att in ipairs(seg.attachments or {}) do
+                table.insert(batchObjects, {
+                    model = att.model,
+                    coords = { x = att.coords.x, y = att.coords.y, z = att.coords.z },
+                    heading = att.heading,
+                    rotation = att.rotation,
+                    hasDualDoors = att.hasDualDoors,
+                    playerName = currentPlacementOptions.playerName or "Unknown",
+                    timestamp = GetRealTimestamp()
+                })
+            end
+        end
+    end
+    
+    if #batchObjects == 0 then
+        SendNUIMessage({
+            action = 'log',
+            message = 'No valid objects in blueprint to place.',
+            type = 'warning'
+        })
+        return false
+    end
+    
+    local maxBatch = (Config and Config.MaxBatchSize) or 300
+    if #batchObjects > maxBatch then
+        SendNUIMessage({
+            action = 'showError',
+            message = string.format("Blueprint contains %d objects, exceeding maximum batch size of %d. Please shorten the wall or use wider segments.", #batchObjects, maxBatch)
+        })
+        return false
+    end
+    
+    -- Clean up blueprint preview entities before authoritative server delta spawns permanent ones
+    CleanupBlueprintEntities()
+    
+    isConfirmPending = true
+    -- Store pending request for reconciliation on failure or confirmation
+    pendingBlueprintRequests[batchReqId] = plan
+    
+    -- Server is authoritative for persistent IDs
+    TriggerServerEvent("bazq-objectplace:batchPlaceObjects", {
+        objects = batchObjects,
+        requestId = batchReqId
+    })
+    
+    SendNUIMessage({
+        action = 'log',
+        message = string.format('Pen Tool: Persisting blueprint with %d objects to server...', #batchObjects),
+        type = 'success'
+    })
+    
+    return true
+end
+
+-- Cancel blueprint without modifying persistent world
+local function CancelBlueprint()
+    CleanupBlueprintEntities()
+    if isConfirmPending then
+        for _, reqPlan in pairs(pendingBlueprintRequests) do
+            reqPlan.userCancelled = true
+        end
+        isConfirmPending = false
+    end
+    currentBlueprintPlan = nil
+    blueprintOverrides = {}
+    activePointA = nil
+    activePointB = nil
+    SendNUIMessage({
+        action = 'log',
+        message = 'Pen Tool: Blueprint cancelled. Persistent world unchanged.',
+        type = 'info'
+    })
+    SendNUIMessage({ action = 'exitDrawingMode' })
+end
+
+-- Main Pen Tool / Blueprint drawing interaction loop
 local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, options, mode, randomizerProps, customPackageProps)
     local pointA = nil
     local pointB = nil
@@ -4245,38 +4620,43 @@ local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, option
     local hasDrawingFocus = false
     local lastHit = false
     local lastHitCoords = vector3(0.0, 0.0, 0.0)
+    
     activePathOptions = options
+    activeSelectedItem = selectedItem
+    currentBlueprintPlan = nil
+    blueprintOverrides = {}
+    selectedSegIndex = 1
+    currentBlueprintSeed = math.random(1, 99999999)
     
     SendNUIMessage({
         action = 'log',
-        message = 'Entered Path Creator. Left Click: Set Point A/B. Right Click/ESC: Exit.',
+        message = 'Entered Pen Tool. Left Click: Set Point A, then Point B to generate Blueprint.',
         type = 'info'
     })
     
     SendNUIMessage({
         action = 'editingModeUpdate',
-        message = "PATH DRAWING: Aim & Left Click to set Point A. Right Click/ESC: Exit.",
+        message = "PEN TOOL: Aim & Left Click to set Point A. Right Click/ESC: Exit.",
         editingActive = true
     })
     
     local playerPed = PlayerPedId()
     SetPedCanSwitchWeapon(playerPed, false)
     DisablePlayerFiring(PlayerId(), true)
-    
-    -- Wait 500ms to prevent NUI click propagation into the placement loop
     Citizen.Wait(500)
     
     while pathDrawing do
         Citizen.Wait(0)
         
-        DisableControlAction(0, 24, true)
-        DisableControlAction(0, 25, true)
-        DisableControlAction(0, 322, true)
-        DisableControlAction(0, 200, true)
-        DisableControlAction(0, 19, true) -- Prevent Character Wheel (Left ALT)
-        DisableControlAction(0, 73, true) -- Prevent Duck/Look Behind (X Key)
+        DisableControlAction(0, 24, true)  -- Attack (LMB)
+        DisableControlAction(0, 25, true)  -- Aim (RMB)
+        DisableControlAction(0, 322, true) -- ESC
+        DisableControlAction(0, 200, true) -- Pause Menu
+        DisableControlAction(0, 19, true)  -- Left ALT
+        DisableControlAction(0, 73, true)  -- X Key
+        DisableControlAction(0, 191, true) -- Enter
         
-        -- Hold Left ALT (Control 19) to show mouse and change settings in UI
+        -- Hold Left ALT to show mouse cursor and interact with NUI
         local isAltPressed = IsDisabledControlPressed(0, 19)
         if isAltPressed then
             if not hasDrawingFocus then
@@ -4290,7 +4670,7 @@ local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, option
             end
         end
         
-        -- Press X (Control 73) to toggle Axis Snapping (90° Snap) in-game
+        -- Press X to toggle 90° Axis Lock in-game
         if IsDisabledControlJustReleased(0, 73) then
             options.axisLock = not options.axisLock
             SendNUIMessage({
@@ -4313,7 +4693,8 @@ local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, option
             hitCoords = lastHitCoords
         end
         
-        if hit and pointA and options.axisLock then
+        -- Axis Snapping
+        if hit and pointA and options.axisLock and not currentBlueprintPlan then
             local rawDir = hitCoords - pointA
             local dist = #(rawDir)
             if dist > 0.1 then
@@ -4322,10 +4703,8 @@ local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, option
                 if prevDir then
                     local anglePrev = math.atan2(-prevDir.x, prevDir.y)
                     local relativeAngle = angleCursor - anglePrev
-                    
                     while relativeAngle > math.pi do relativeAngle = relativeAngle - 2 * math.pi end
                     while relativeAngle < -math.pi do relativeAngle = relativeAngle + 2 * math.pi end
-                    
                     local snappedRelative = math.floor((relativeAngle + math.rad(45)) / math.rad(90)) * math.rad(90)
                     snappedAngle = anglePrev + snappedRelative
                 else
@@ -4336,158 +4715,114 @@ local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, option
             end
         end
         
-        -- Render cyan snapping grid on the terrain
-        if options.axisLock and pointA then
-            local spacing = customWidth or 1.0
-            if isPackage then
-                local pkgData = Config.PathCreator.packages[selectedItem]
-                spacing = (pkgData and type(pkgData) == "table" and pkgData.width) or 1.0
+        -- PRE-BLUEPRINT VISUALIZATION (Setting A and B)
+        if not currentBlueprintPlan then
+            if pointA then
+                DrawMarker(28, pointA.x, pointA.y, pointA.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 255, 120, 0, 200, false, true, 2, nil, nil, false)
+                if hit then
+                    DrawLine(pointA.x, pointA.y, pointA.z + 0.1, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0, 255, 0, 255)
+                    DrawMarker(28, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0, 255, 0, 200, false, true, 2, nil, nil, false)
+                end
             else
-                spacing = Config.PathCreator.props[selectedItem] or customWidth or 1.0
+                if hit then
+                    DrawMarker(28, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0, 120, 255, 200, false, true, 2, nil, nil, false)
+                end
             end
             
-            local gridHeading = 0.0
-            if prevDir then
-                gridHeading = math.atan2(-prevDir.x, prevDir.y)
-            end
-            
-            local rightDir = vector3(-math.sin(gridHeading + math.rad(90)), math.cos(gridHeading + math.rad(90)), 0.0)
-            local fwdDir = vector3(-math.sin(gridHeading), math.cos(gridHeading), 0.0)
-            
-            for i = -10, 10 do
-                local offsetR = rightDir * (i * spacing)
-                local startP = pointA + offsetR - fwdDir * (10 * spacing)
-                local endP = pointA + offsetR + fwdDir * (10 * spacing)
-                
-                local success1, z1 = GetGroundZFor_3dCoord(startP.x, startP.y, pointA.z + 10.0, false)
-                local success2, z2 = GetGroundZFor_3dCoord(endP.x, endP.y, pointA.z + 10.0, false)
-                local drawZ1 = success1 and z1 or startP.z
-                local drawZ2 = success2 and z2 or endP.z
-                
-                DrawLine(startP.x, startP.y, drawZ1 + 0.1, endP.x, endP.y, drawZ2 + 0.1, 0, 180, 255, 60)
-                
-                local offsetF = fwdDir * (i * spacing)
-                local startP2 = pointA + offsetF - rightDir * (10 * spacing)
-                local endP2 = pointA + offsetF + rightDir * (10 * spacing)
-                
-                local success1_2, z1_2 = GetGroundZFor_3dCoord(startP2.x, startP2.y, pointA.z + 10.0, false)
-                local success2_2, z2_2 = GetGroundZFor_3dCoord(endP2.x, endP2.y, pointA.z + 10.0, false)
-                local drawZ1_2 = success1_2 and z1_2 or startP2.z
-                local drawZ2_2 = success2_2 and z2_2 or endP2.z
-                
-                DrawLine(startP2.x, startP2.y, drawZ1_2 + 0.1, endP2.x, endP2.y, drawZ2_2 + 0.1, 0, 180, 255, 60)
-            end
-        end
-        
-        if pointA then
-            DrawMarker(28, pointA.x, pointA.y, pointA.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 255, 120, 0, 200, false, true, 2, nil, nil, false)
-            
-            if hit then
-                DrawLine(pointA.x, pointA.y, pointA.z + 0.1, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0, 255, 0, 255)
-                DrawMarker(28, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0, 255, 0, 200, false, true, 2, nil, nil, false)
-                
-                local dist = #(hitCoords - pointA)
-                local dir = (hitCoords - pointA) / dist
-                local tempDist = 0.0
-                
-                local pathHeading = math.deg(math.atan2(dir.x, dir.y))
-                
-                local segmentIndex = 1
-                while tempDist < dist do
-                    local width = customWidth
-                    
-                    if mode == "multi" then
-                        local seed = math.floor(pointA.x * 100) + math.floor(pointA.y * 100) + segmentIndex * 17
-                        local randVal = (math.abs(seed) % 100) + 1
-                        local selectedProp = nil
-                        local currentSum = 0
-                        for _, p in ipairs(randomizerProps) do
-                            currentSum = currentSum + (tonumber(p.weight) or 0)
-                            if randVal <= currentSum then
-                                selectedProp = p
-                                break
-                            end
+            -- Left Click: Set Point A or Point B
+            if IsDisabledControlJustReleased(0, 24) and hit and not hasDrawingFocus then
+                if not pointA then
+                    pointA = hitCoords
+                    activePointA = pointA
+                    SendNUIMessage({
+                        action = 'editingModeUpdate',
+                        message = "PEN TOOL: Point A set. Left Click to set Point B and generate Blueprint.",
+                        editingActive = true
+                    })
+                else
+                    pointB = hitCoords
+                    activePointB = pointB
+                    local dist = #(pointB - pointA)
+                    if dist >= 0.1 then
+                        -- GENERATE BLUEPRINT
+                        currentBlueprintSeed = math.random(1, 99999999)
+                        blueprintOverrides = {}
+                        currentBlueprintPlan = GenerateBlueprintPlan(pointA, pointB, selectedItem, options, currentBlueprintSeed, blueprintOverrides)
+                        if currentBlueprintPlan and #currentBlueprintPlan.segments > 0 then
+                            RenderBlueprintPlan(currentBlueprintPlan)
+                            selectedSegIndex = 1
+                            SendBlueprintToNUI(currentBlueprintPlan, selectedSegIndex)
+                            SendNUIMessage({
+                                action = 'editingModeUpdate',
+                                message = "BLUEPRINT ACTIVE: Hold LALT to use UI / Aim & Left Click segment to select. Press Confirm when ready.",
+                                editingActive = true
+                            })
+                        else
+                            SendNUIMessage({
+                                action = 'log',
+                                message = 'Path too short for chosen package props.',
+                                type = 'warning'
+                            })
+                            pointB = nil
                         end
-                        if not selectedProp and #randomizerProps > 0 then
-                            selectedProp = randomizerProps[1]
-                        end
-                        width = selectedProp and tonumber(selectedProp.width) or customWidth
-                    elseif isPackage then
-                        local pkgData = Config.PathCreator.packages[selectedItem]
-                        width = (type(pkgData) == "table" and pkgData.width) or pkgData or 1.0
                     else
-                        width = Config.PathCreator.props[selectedItem] or customWidth
+                        pointB = nil
                     end
-                    
-                    if tempDist + width > dist then
-                        break
-                    end
-                    
-                    local centerPos = pointA + dir * (tempDist + width / 2)
-                    local spawnZ = centerPos.z
-                    
-                    if options.snapToGround then
-                        local hitVal, gZ = GetGroundZFor_3dCoord(centerPos.x, centerPos.y, centerPos.z + 10.0, false)
-                        if hitVal then
-                            spawnZ = gZ
-                        end
-                    end
-                    
-                    DrawMarker(1, centerPos.x, centerPos.y, spawnZ, 0.0, 0.0, 0.0, 0.0, 0.0, pathHeading, width, 0.2, 0.5, 0, 255, 0, 80, false, true, 2, nil, nil, false)
-                    
-                    tempDist = tempDist + width
-                    segmentIndex = segmentIndex + 1
-                    if segmentIndex > 100 then break end
                 end
             end
         else
-            if hit then
-                DrawMarker(28, hitCoords.x, hitCoords.y, hitCoords.z + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.3, 0.3, 0, 120, 255, 200, false, true, 2, nil, nil, false)
-            end
-        end
-        
-        if IsDisabledControlJustReleased(0, 24) and hit and not hasDrawingFocus then
-            if not pointA then
-                pointA = hitCoords
-                SendNUIMessage({
-                    action = 'editingModeUpdate',
-                    message = "PATH DRAWING: Point A set. Left Click to set Point B and build walls.",
-                    editingActive = true
-                })
-            else
-                pointB = hitCoords
-                local dist = #(pointB - pointA)
-                if dist >= 0.1 then
-                    local dir = (pointB - pointA) / dist
-                    
-                    -- Check if corner tower is needed (angle change close to options.cornerAngle)
-                    local spawnTower = false
-                    if options.cornerTowers and prevDir then
-                        local dot = prevDir.x * dir.x + prevDir.y * dir.y + prevDir.z * dir.z
-                        dot = math.max(-1.0, math.min(1.0, dot))
-                        local angleChange = math.abs(math.deg(math.acos(dot)))
-                        
-                        local targetAngle = tonumber(options.cornerAngle) or 90.0
-                        if math.abs(angleChange - targetAngle) <= 30.0 then
-                            spawnTower = true
+            -- BLUEPRINT ACTIVE: In-world segment picking and inspection
+            if currentBlueprintPlan and currentBlueprintPlan.segments and #currentBlueprintPlan.segments > 0 then
+                -- Highlight currently selected segment with marker
+                local selSeg = currentBlueprintPlan.segments[selectedSegIndex]
+                if selSeg and selSeg.primary and selSeg.primary.coords then
+                    DrawMarker(0, selSeg.primary.coords.x, selSeg.primary.coords.y, selSeg.primary.coords.z + 2.4, 
+                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4, 0.4, 0.4, 56, 189, 248, 220, false, true, 2, nil, nil, false)
+                end
+                
+                -- Raycast picking in 3D world when aiming without ALT
+                if hit and not hasDrawingFocus then
+                    local closestIdx = nil
+                    local closestDistSq = 9.0 -- Within 3 meters
+                    for i, seg in ipairs(currentBlueprintPlan.segments) do
+                        local sCoords = seg.primary.coords
+                        local dSq = (hitCoords.x - sCoords.x)^2 + (hitCoords.y - sCoords.y)^2 + (hitCoords.z - sCoords.z)^2
+                        if dSq < closestDistSq then
+                            closestDistSq = dSq
+                            closestIdx = i
                         end
                     end
                     
-                    local success, actualPlacedDist = BuildPathProps(pointA, pointB, selectedItem, isPackage, customWidth, options, mode, randomizerProps, spawnTower, prevDir, customPackageProps)
-                    if success then
-                        prevDir = dir
-                        pointA = pointA + dir * actualPlacedDist
-                        pointB = nil
-                    else
-                        pointB = nil
+                    if closestIdx then
+                        -- Draw hover indicator
+                        local hSeg = currentBlueprintPlan.segments[closestIdx]
+                        DrawMarker(28, hSeg.primary.coords.x, hSeg.primary.coords.y, hSeg.primary.coords.z + 1.2,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.25, 0.25, 0, 255, 120, 160, false, true, 2, nil, nil, false)
+                        
+                        -- Left click to select segment
+                        if IsDisabledControlJustReleased(0, 24) then
+                            selectedSegIndex = closestIdx
+                            SendNUIMessage({ action = 'selectBlueprintSegment', index = selectedSegIndex })
+                        end
                     end
-                else
-                    pointB = nil
+                end
+            end
+            
+            -- Enter Key: Confirm Blueprint
+            if IsDisabledControlJustReleased(0, 191) and not hasDrawingFocus then
+                if currentBlueprintPlan then
+                    ConfirmBlueprint(currentBlueprintPlan)
+                    pathDrawing = false
+                    break
                 end
             end
         end
         
+        -- Right Click or ESC: Cancel
         if (IsDisabledControlJustReleased(0, 25) or IsDisabledControlJustReleased(0, 322) or IsDisabledControlJustReleased(0, 200)) and not hasDrawingFocus then
+            if currentBlueprintPlan then
+                CancelBlueprint()
+            end
             pathDrawing = false
             break
         end
@@ -4495,6 +4830,8 @@ local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, option
     
     pathDrawing = false
     activePathOptions = nil
+    CleanupBlueprintEntities()
+    
     SetPedCanSwitchWeapon(playerPed, true)
     DisablePlayerFiring(PlayerId(), false)
     
@@ -4506,18 +4843,133 @@ local function StartPathDrawingLoop(selectedItem, isPackage, customWidth, option
     OpenNUIMenu()
 end
 
+-- NUI CALLBACKS FOR PEN TOOL / BLUEPRINT ACTIONS
+RegisterNUICallback('blueprintAction', function(data, cb)
+    if not pathDrawing then cb('error'); return end
+    local action = data.action
+    
+    if action == "confirm" then
+        if currentBlueprintPlan then
+            ConfirmBlueprint(currentBlueprintPlan)
+            pathDrawing = false
+        end
+        cb('ok')
+    elseif action == "cancel" then
+        CancelBlueprint()
+        pathDrawing = false
+        cb('ok')
+    elseif action == "randomize" then
+        currentBlueprintSeed = math.random(1, 99999999)
+        if activePointA and activePointB and activeSelectedItem then
+            currentBlueprintPlan = GenerateBlueprintPlan(activePointA, activePointB, activeSelectedItem, activePathOptions, currentBlueprintSeed, blueprintOverrides)
+            RenderBlueprintPlan(currentBlueprintPlan)
+            if selectedSegIndex > #currentBlueprintPlan.segments then
+                selectedSegIndex = math.max(1, #currentBlueprintPlan.segments)
+            end
+            SendBlueprintToNUI(currentBlueprintPlan, selectedSegIndex)
+        end
+        cb('ok')
+    elseif action == "selectSegment" then
+        selectedSegIndex = tonumber(data.index) or 1
+        SendNUIMessage({ action = 'selectBlueprintSegment', index = selectedSegIndex })
+        cb('ok')
+    elseif action == "replaceSegment" then
+        local idx = tonumber(data.index) or selectedSegIndex
+        local targetModel = data.model
+        if currentBlueprintPlan and currentBlueprintPlan.segments and currentBlueprintPlan.segments[idx] then
+            local seg = currentBlueprintPlan.segments[idx]
+            local targetLen = Config.PenTool.props[targetModel] or 2.0
+            local isGate = targetModel:match("gate") ~= nil
+            
+            local distKey = seg.distKey
+            blueprintOverrides[distKey] = {
+                model = targetModel,
+                length = targetLen,
+                isGate = isGate,
+                locked = true
+            }
+            
+            currentBlueprintPlan = GenerateBlueprintPlan(activePointA, activePointB, activeSelectedItem, activePathOptions, currentBlueprintSeed, blueprintOverrides)
+            RenderBlueprintPlan(currentBlueprintPlan)
+            if selectedSegIndex > #currentBlueprintPlan.segments then
+                selectedSegIndex = math.max(1, #currentBlueprintPlan.segments)
+            end
+            SendBlueprintToNUI(currentBlueprintPlan, selectedSegIndex)
+        end
+        cb('ok')
+    elseif action == "flipSegment" then
+        local idx = tonumber(data.index) or selectedSegIndex
+        if currentBlueprintPlan and currentBlueprintPlan.segments and currentBlueprintPlan.segments[idx] then
+            local seg = currentBlueprintPlan.segments[idx]
+            local distKey = seg.distKey
+            if not blueprintOverrides[distKey] then
+                blueprintOverrides[distKey] = {
+                    model = seg.primary.model,
+                    length = seg.length,
+                    isGate = seg.isGate,
+                    locked = true
+                }
+            end
+            blueprintOverrides[distKey].flipped = not blueprintOverrides[distKey].flipped
+            currentBlueprintPlan = GenerateBlueprintPlan(activePointA, activePointB, activeSelectedItem, activePathOptions, currentBlueprintSeed, blueprintOverrides)
+            RenderBlueprintPlan(currentBlueprintPlan)
+            SendBlueprintToNUI(currentBlueprintPlan, selectedSegIndex)
+        end
+        cb('ok')
+    elseif action == "deleteSegment" then
+        local idx = tonumber(data.index) or selectedSegIndex
+        if currentBlueprintPlan and currentBlueprintPlan.segments and currentBlueprintPlan.segments[idx] then
+            local seg = currentBlueprintPlan.segments[idx]
+            local distKey = seg.distKey
+            blueprintOverrides[distKey] = {
+                deleted = true,
+                length = seg.length,
+                locked = true
+            }
+            currentBlueprintPlan = GenerateBlueprintPlan(activePointA, activePointB, activeSelectedItem, activePathOptions, currentBlueprintSeed, blueprintOverrides)
+            RenderBlueprintPlan(currentBlueprintPlan)
+            if selectedSegIndex > #currentBlueprintPlan.segments then
+                selectedSegIndex = math.max(1, #currentBlueprintPlan.segments)
+            end
+            SendBlueprintToNUI(currentBlueprintPlan, selectedSegIndex)
+        end
+        cb('ok')
+    elseif action == "unlockSegment" then
+        local idx = tonumber(data.index) or selectedSegIndex
+        if currentBlueprintPlan and currentBlueprintPlan.segments and currentBlueprintPlan.segments[idx] then
+            local seg = currentBlueprintPlan.segments[idx]
+            local distKey = seg.distKey
+            blueprintOverrides[distKey] = nil
+            currentBlueprintPlan = GenerateBlueprintPlan(activePointA, activePointB, activeSelectedItem, activePathOptions, currentBlueprintSeed, blueprintOverrides)
+            RenderBlueprintPlan(currentBlueprintPlan)
+            if selectedSegIndex > #currentBlueprintPlan.segments then
+                selectedSegIndex = math.max(1, #currentBlueprintPlan.segments)
+            end
+            SendBlueprintToNUI(currentBlueprintPlan, selectedSegIndex)
+        end
+        cb('ok')
+    else
+        cb('unknown')
+    end
+end)
+
 RegisterNUICallback('updateDrawingOptions', function(data, cb)
     if pathDrawing and activePathOptions then
         for k, v in pairs(data) do
             activePathOptions[k] = v
+        end
+        if currentBlueprintPlan and activePointA and activePointB and activeSelectedItem then
+            currentBlueprintPlan = GenerateBlueprintPlan(activePointA, activePointB, activeSelectedItem, activePathOptions, currentBlueprintSeed, blueprintOverrides)
+            RenderBlueprintPlan(currentBlueprintPlan)
+            SendBlueprintToNUI(currentBlueprintPlan, selectedSegIndex)
         end
     end
     cb('ok')
 end)
 
 RegisterNUICallback('startPathDrawing', function(data, cb)
-    if placing or editingObjectData then
-        SendNUIMessage({action = 'showError', message = "Finish placement/editing before drawing paths."})
+    if placing or editingObjectData or pathDrawing then
+        SendNUIMessage({action = 'showError', message = "Finish current placement/editing before using Pen Tool."})
         cb({status = 'error'}); return
     end
     
@@ -4533,7 +4985,7 @@ RegisterNUICallback('startPathDrawing', function(data, cb)
         if model == "bazq-wall3" then
             model = "wall3"
         end
-        if Config.PathCreator.packages[model] then
+        if Config.PenTool.packages[model] or (Config.PathCreator and Config.PathCreator.packages and Config.PathCreator.packages[model]) then
             isPackage = true
         end
     end

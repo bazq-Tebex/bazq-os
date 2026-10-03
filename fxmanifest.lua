@@ -4,7 +4,7 @@ game 'gta5'
 name 'bazq-os'
 description 'bazq Object Spawner - Professional building system with advanced placement tools'
 author 'bazq'
-version '2.3.1'
+version '3.0.0'
 
 
 shared_scripts {

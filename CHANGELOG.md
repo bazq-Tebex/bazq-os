@@ -1,5 +1,71 @@
 # *bazq*-os Changelog
 
+## Version 3.0.0 - October 2026 🏗️
+
+### 🔑 Phase 2 — Persistent Object IDs
+
+- **Deterministic UUIDs**: Every placed object now receives a stable, server-assigned persistent ID. IDs survive server restarts and are stored in `saved_objects.json` alongside all position data.
+- **Delta Synchronization**: New client events `objectCreated`, `objectUpdated`, `objectDeleted`, `objectsBatchCreated`, `objectsBatchDeleted` deliver only changed records instead of broadcasting the full list on every mutation.
+- **Revision Counter**: A monotonically-increasing server revision number prevents stale clients from overwriting newer state.
+
+### 🌐 Phase 3 — Server-Authoritative CRUD & Batch Operations
+
+- **All Mutations Are Server-Side**: Object placement, editing, and deletion now go through server-validated handlers (`placeObject`, `editObject`, `deleteObject`, `batchPlaceObjects`). The client can never self-assign an ID.
+- **`batchPlaceObjects`**: Single event to persist an entire Pen Tool blueprint (up to `Config.MaxBatchSize = 300` objects) atomically. The server validates permissions, size limits, and data integrity before committing.
+- **`mutationFailed` Event**: Server sends a structured failure reason back to the client. The client restores the pending confirmation state and re-enables the Confirm button so the user can retry.
+- **Race Protection**: `isConfirmPending` flag on the client blocks duplicate confirmation requests during network round-trips.
+
+### ✏️ Pen Tool / Blueprint Editor
+
+- **Two-Click Workflow**: Click Point A, click Point B — a full blueprint is generated instantly as a temporary client-side preview (semi-transparent, no collision, no persistence).
+- **Deterministic Layout with PRNG Seed**: `GenerateBlueprintPlan` uses a seeded pseudo-random number generator so the layout is fully reproducible. Re-randomize at any time with a new seed without changing A/B points.
+- **Segment Editing**: Select any segment by clicking it in-world or using the prev/next navigator. Replace the model, flip its facing, delete it (creates a gap), or unlock/reset to procedural.
+- **Gate Assembly**: Segments automatically get companion props — stone wall gates get dual animated doors at the correct ±5.37824m offsets; concrete gates get pole attachments; wood gate frames get their animated gate leaf.
+- **Axis Lock (90° Snapping)**: Toggle with `[X]` key. First segment snaps to world cardinal axes; subsequent segments snap to 90° steps relative to the previous direction.
+- **Corner Towers**: Optional corner towers (`bazq-kule1` + ladder) at Point A for stone wall packages.
+- **Confirm & Cancel**: Confirm pushes the flattened batch to the server via `batchPlaceObjects`. Cancel discards all preview entities, leaving the persistent world unchanged.
+
+### 📐 Overlap Margin
+
+- **User-Adjustable Setting**: Added "Overlap Margin (m)" field in the Path Configuration panel (default: `0.02m` / 2 cm).
+- **Seam Prevention**: Each segment's path cursor advances by `segLength - overlapMargin` instead of `segLength`, causing adjacent segments to overlap slightly. This closes hairline gaps that appear on sloped terrain due to floating-point edge alignment.
+- **Safe Range**: `0.00m` (no overlap) to `0.50m` maximum. Values are validated and clamped server-side before use.
+
+### 🧹 Repository Cleanup
+
+- **`.gitignore`**: Added entries to suppress `__pycache__/`, `client.zip`, and `dolu_tool-main/` from untracked file lists.
+- **`fxmanifest.lua`**: Removed erroneous `client/gizmo.js` from `client_scripts` (JS is not a valid Lua client script entry). Version bumped to `3.0.0`.
+
+---
+
+## Version 2.4.0 - July 2026 🏰
+
+### 🔀 Axis Snapping & Snapping Grid
+- **90° Axis Lock**: Snaps the first path segment to cardinal world axes and all subsequent segments to 90-degree steps relative to the previous segment's heading (toggled via **X Key** in-game).
+- **Conforming Snapping Grid**: Renders a conforming cyan (`0, 180, 255`) 20x20 grid overlay on the terrain centered on the starting point when drawing with Axis Lock enabled, with spacing aligned to the selected wall's width.
+- **Safety Z Checks**: Fixed ground Z verification checks to prevent lines from glitching to `0.0` Z levels in unloaded terrain segments.
+
+### 📐 Overlap Margin Configuration
+- **Custom Overlap Spacing**: Added an input field `Overlap Margin (cm)` (default 1.5 cm) inside NUI Path Configurations.
+- **Seamless Joins**: Converts centimeters to game coordinates and subtracts it from segment spacing to overlap walls slightly, avoiding gaps.
+
+### 🏰 Age of Empires Style Wall-to-Gate Conversion
+- **Target Interaction**: Target options (`ox_target` / `qb-target`) allow swapping placed wall segments into gates.
+- **Dynamic Swapping**:
+  - Concrete walls swap 1-to-1 with `bazq-wall2_gate1`.
+  - Wood panels swap 1-to-1 with `bazq-wall3_gateframe`.
+  - Sur walls search for a neighbor, delete both, and spawn a `20.0m` gateway frame (`bazq-sur_kapi`) with double doors (`bazq-sur_mkapi`) at their midpoint.
+
+### 🪵 Wood Wall & Logs Customization (`wall3` package)
+- **Log Sizes Updates**: Updated package weights and log widths (`bazq-wood_prop1` to `5`) to match user specification values (30cm, 37cm, 40cm, 46cm, 50cm).
+- **Wood Panels Support**: Added panels `bazq-wall3_wall1` (1.98m), `bazq-wall3_wall2` (1.95m), `bazq-wall3_wall3` (2.01m), and `bazq-wall3_gateframe` (2.01m).
+
+### ⌨️ NUI Focus Hold & Overlay Cleanup
+- **LALT Focus Hold**: Holding Left ALT displays the mouse cursor and gives NUI focus dynamically to modify overlay options. Releasing it returns focus to look-around.
+- **Sleek Floating Panel**: Drawing mode hides headers and background panels, leaving only a floating configuration panel. Hides close buttons during drawing to prevent breaking states.
+
+---
+
 ## Version 2.3.1 - February 2026 🛠️
 
 ### 🧱 Interior & Z-Drift Fixes

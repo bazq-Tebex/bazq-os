@@ -1567,10 +1567,11 @@ AddEventHandler("bazq-objectplace:batchPlaceObjects", function(payload)
     end
     
     local items = payload.objects or payload
-    if type(items) ~= "table" or #items == 0 or #items > 200 then
+    local maxBatch = (Config and Config.MaxBatchSize) or 300
+    if type(items) ~= "table" or #items == 0 or #items > maxBatch then
         TriggerClientEvent("bazq-objectplace:mutationFailed", src, {
             action = "batchPlaceObjects",
-            reason = "Batch size must be between 1 and 200 items",
+            reason = string.format("Batch size must be between 1 and %d items", maxBatch),
             requestId = payload.requestId
         })
         return

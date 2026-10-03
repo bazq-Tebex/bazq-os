@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local dev artifacts / build artifacts
+client.zip
+dolu_tool-main/
+
+# Editor / OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Saved state (runtime-generated, should not be versioned)
+# saved_objects.json

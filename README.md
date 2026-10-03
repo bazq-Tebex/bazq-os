@@ -2,8 +2,12 @@
 
 Professional object spawning and building system for FiveM servers. Place, edit, and manage objects with advanced tools, built-in user management, and developer-friendly configurations.
 
-![Version](https://img.shields.io/badge/version-2.3.1-green.svg)
+![Version](https://img.shields.io/badge/version-3.0.0-green.svg)
 ![Platform](https://img.shields.io/badge/platform-FiveM-blue.svg)
+![License](https://img.shields.io/badge/license-Open%20Source-brightgreen.svg)
+
+> **Open Source Notice:** `bazq-os` (this script) is fully open source and free to modify for your server.
+> Prop packs (e.g., Wall Pack 1, Wall Pack 2, Wood Palisade) are **separate commercial assets** sold on [bazq.tebex.io](https://bazq.tebex.io) and are **not included** in this repository.
 
 ---
 
@@ -24,6 +28,8 @@ Contact your server admin for permissions. You need the **Owner**, **Admin**, or
 - **Left Click** - Place selected object
 - **Q / E** - Rotate object temporarily before placing
 - **F6** - Toggle freecam (noclip) for easier building
+- **Left ALT (Hold)** - Shows mouse cursor and grants NUI focus to modify options on the configuration overlay during drawing
+- **X** - Toggles 90° Axis Snapping state in-game while drawing paths
 
 ### 🎛️ Main Features
 
@@ -32,6 +38,18 @@ Contact your server admin for permissions. You need the **Owner**, **Admin**, or
 - **Categorized Objects**: Browse neatly sorted categories (Tents, walls, towers, gates, signs, aircraft).
 - **Search Function**: Find objects quickly by typing their name.
 - **Package System**: Distinct object packs loaded automatically.
+
+#### ✏️ Pen Tool / Blueprint Editor
+
+- **Two-Click Blueprint**: Click Point A, then Point B to instantly generate a full deterministic blueprint as a client-side preview (semi-transparent, no collision, not yet saved).
+- **Segment Editing**: Select any segment in-world or via the navigator. Replace the model, flip its facing, delete it (creates a gap), or unlock/reset to procedural.
+- **Gate Assembly**: Segments automatically spawn companion props — stone wall gates include dual animated doors; concrete gates include poles; wood gate frames include their animated gate leaf.
+- **Randomize Seed**: Re-shuffle the procedural layout with a new random seed while keeping A/B points fixed.
+- **90° Axis Lock**: Toggle with `[X]` key. First segment snaps to world cardinal axes; subsequent segments snap to local 90° corners relative to the previous segment's direction.
+- **Corner Towers**: Optional corner towers (`bazq-kule1` + ladder) placed at Point A for stone wall packages.
+- **Overlap Margin**: Configurable in the Path Configuration panel (default: `0.02m` / 2 cm). Overlaps consecutive segments to close hairline seams caused by floating-point edge alignment on sloped terrain. Set to `0.00m` for no overlap.
+- **Confirm & Cancel**: Confirm pushes the exact blueprint to the server via a single atomic batch call. Cancel discards all preview entities — the persistent world is never touched until you explicitly confirm.
+- **Live Option Sync**: Real-time settings sync between the floating UI panel (Snap/Align to Ground, Overlap Margin, Decals) and the drawing loop.
 
 #### ⚙️ Manual Spawner
 
@@ -44,6 +62,10 @@ Contact your server admin for permissions. You need the **Owner**, **Admin**, or
 - **Ground Snapping**: Auto-align objects to the ground level (`G` key).
 - **Precision Rotation**: Snap rotation to 1° or 5° steps during edit mode.
 - **Teleport to Object**: Instantly jump to any placed object via the "Placed" tab.
+- **Age of Empires Wall-to-Gate conversion**: Swaps placed wall segments into gates dynamically via target options (`ox_target` / `qb-target`).
+  - *Concrete Walls*: Replaces a concrete segment 1-to-1 with `bazq-wall2_gate1`.
+  - *Wood Panels*: Replaces an individual panel 1-to-1 with `bazq-wall3_gateframe`.
+  - *Sur Walls*: Automatically searches for an adjacent sur wall within 11.0m, deletes both segments to open a 20m gap, and spawns the `bazq-sur_kapi` gateway frame (complete with physics-enabled double doors `bazq-sur_mkapi` +90°/-90° offsets) exactly at their center point.
 
 ### 🎮 Detailed Controls
 
@@ -54,6 +76,13 @@ Contact your server admin for permissions. You need the **Owner**, **Admin**, or
 - **Q / E**: Rotate left/right.
 - **Mouse Wheel**: Adjust height manually offset.
 - **G**: Toggle ground snapping.
+
+#### Path Drawing Mode (Drawing Mode)
+- **Mouse**: Point/draw to direct the line of walls.
+- **Left Click**: Set Point A / confirm path placement.
+- **Right Click / ESC**: Cancel/exit drawing mode.
+- **Left ALT (Hold)**: Show cursor and click checkboxes/inputs on the floating UI panel.
+- **X Key**: Toggle 90° Axis Lock on/off.
 
 #### Keyboard Edit Mode
 
@@ -152,6 +181,7 @@ The source of truth for the UI's Library tab. Add completely custom map props he
 - We've included a standalone `json2ymap.py` script equipped with a `tkinter` GUI.
 - **Architecture Flow**: The script reads `saved_objects.json`, computes quaternion rotations internally using native mathematical bindings, and spits out standard XML nodes matching CodeWalker's raw YMAP specifications.
 - **Customizing It**: You can open `json2ymap.py` and modify the default LOD distance (`lodDist`), the extents computations, or adjust how bounding spheres are calculated iteratively.
+- **Dual Doors Support**: The converter automatically handles dual door frames (`bazq-sur_kapi`) by splitting them into two correctly rotated and offset door entities (`bazq-sur_mkapi`) in the exported `.ymap.xml`.
 
 ### 🛠️ Developer Debugging Ecosystem
 
